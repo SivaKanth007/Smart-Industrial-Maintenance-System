@@ -13,6 +13,7 @@ venv/
 .venv/
 .env/
 env/
+.claude/
 
 # Raw datasets (large, downloaded automatically by training scripts)
 data/raw/
