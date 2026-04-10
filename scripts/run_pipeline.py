@@ -16,6 +16,16 @@ sys.path.insert(0, PROJECT_ROOT)
 
 import config
 from src.data.preprocess import DataPreprocessor
+
+
+def _capture_screenshots():
+    """Update assets/ screenshots after results change. Silently skips if playwright is missing."""
+    try:
+        sys.path.insert(0, os.path.join(PROJECT_ROOT, "scripts"))
+        from capture_screenshots import capture
+        capture()
+    except Exception:
+        pass  # Never block the pipeline due to screenshot errors
 from src.models.autoencoder import load_autoencoder
 from src.models.lstm_predictor import load_predictor
 from src.models.xgboost_rul import XGBoostRUL
@@ -146,6 +156,9 @@ def run_pipeline(test_mode=False):
     # Save recommendations
     rec_df.to_csv(os.path.join(config.PROCESSED_DATA_DIR, "recommendations.csv"), index=False)
     print(f"\n[PIPELINE] Recommendations saved to {config.PROCESSED_DATA_DIR}/recommendations.csv")
+
+    # Auto-update dashboard screenshots
+    _capture_screenshots()
 
     return {
         "anomaly_scores": anomaly_scores,

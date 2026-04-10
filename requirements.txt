@@ -33,6 +33,10 @@ widgetsnbextension>=4.0.0
 # Testing
 pytest>=7.2.0
 
+# Dashboard screenshots (optional — enables auto-capture after runs)
+# After installing: playwright install chromium
+playwright>=1.40.0
+
 # Dataset download
 kagglehub>=0.3.0
 kaggle>=1.5.0

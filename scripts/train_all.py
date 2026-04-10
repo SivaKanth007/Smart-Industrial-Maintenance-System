@@ -238,7 +238,22 @@ def main():
         size = os.path.getsize(os.path.join(config.MODELS_DIR, f)) / 1e6
         print(f"    - {f} ({size:.2f} MB)")
     print()
+    print("  Running inference pipeline to generate recommendations...")
+    # Run inference so the dashboard has up-to-date recommendations
+    _run_inference()
+
+    print()
     print("  Next: Run 'streamlit run dashboard/app.py' for the interactive dashboard")
+
+
+def _run_inference():
+    """Run inference + screenshot capture after training completes."""
+    try:
+        sys.path.insert(0, os.path.join(PROJECT_ROOT, "scripts"))
+        from run_pipeline import run_pipeline
+        run_pipeline()
+    except Exception as exc:
+        print(f"  [WARN] Inference step failed: {exc}")
 
 
 if __name__ == "__main__":
