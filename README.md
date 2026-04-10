@@ -66,89 +66,129 @@ Streamlit Dashboard (7 pages)
 
 - Python 3.9 or higher
 - No GPU required — CUDA is auto-detected and used if available
-- For GPU support: `pip install torch torchvision --index-url https://download.pytorch.org/whl/cu126`
 
-### Step 1 — Clone and Install
+---
+
+### Step 1 — Clone the repository
 
 ```bash
-git clone https://github.com/SivaKanth007/Capstone-Project.git
-cd Capstone-Project
+git clone https://github.com/SivaKanth007/Smart-Industrial-Maintenance-System.git
+cd Smart-Industrial-Maintenance-System
+```
 
+---
+
+### Step 2 — Create a virtual environment
+
+Using a virtual environment keeps dependencies isolated and avoids conflicts with your system Python.
+
+**Windows:**
+```bash
+python -m venv .venv
+.venv\Scripts\activate
+```
+
+**macOS / Linux:**
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+```
+
+---
+
+### Step 3 — Install dependencies
+
+```bash
 pip install -e ".[test]"
-# OR
-pip install -r requirements.txt
 ```
 
-### Step 2 — Train C-MAPSS Models
+This installs all required packages including PyTorch, XGBoost, Streamlit, scikit-learn, lifelines, SHAP, PuLP, and pytest.
 
-```bash
-python scripts/train_all.py
-# OR
-make train
-```
+---
 
-This single command:
-- Downloads the NASA C-MAPSS turbofan dataset automatically (no manual steps)
-- Generates synthetic maintenance logs and operational context
-- Engineers 200+ features from sensor data
-- Trains all 4 ML models
-- Runs Monte Carlo policy simulation (50 runs, 50 machines)
-- Saves all model artifacts to `models/saved/`
+### Step 4 — Launch the dashboard
 
-**Training time:** ~5 minutes on CPU. Significantly faster on GPU.
-
-### Step 3 — Run Inference
-
-```bash
-python scripts/run_pipeline.py
-# OR
-make inference
-```
-
-Loads all saved models, scores all machines, and writes maintenance recommendations to `data/processed/recommendations.csv`.
-
-### Step 4 — Launch Dashboard
+Pre-trained models and results are included in the repository. You can launch the dashboard immediately after install — no training required.
 
 ```bash
 streamlit run dashboard/app.py
-# OR
-make dashboard
 ```
 
-Opens at **http://localhost:8501**. Seven pages: Fleet Overview, Risk Assessment, Maintenance Schedule, Model Performance, Explainability & AI Insights, Maintenance History, Operational Context.
+Opens at **http://localhost:8501**
 
-### Step 5 — Run Tests
+Seven pages: Fleet Overview · Risk Assessment · Maintenance Schedule · Model Performance · Explainability & AI Insights · Maintenance History · Operational Context
+
+---
+
+### Step 5 — Run tests
 
 ```bash
 python -m pytest
-# OR
-make test
 ```
 
 All **50 unit tests** across 4 modules should pass.
 
 ---
 
-## IMS Bearing Pipeline
+## Retraining the Models
 
-To run the IMS Bearing dataset pipeline (vibration signal data), open one of the notebooks in Jupyter:
+Pre-trained results are already committed. Retrain only if you want to update the models with new data or changed hyperparameters.
 
-- `notebooks/Smart_Industrial_Maintenance_Repo_Pipeline.ipynb` — Repository-integrated pipeline
-- `notebooks/Smart_Industrial_Maintenance_Standalone_Pipeline.ipynb` — Self-contained notebook (no local src imports)
+### Path A — Python scripts (C-MAPSS turbofan dataset)
 
-Both notebooks:
-- Download the NASA IMS Bearing dataset (~2 GB) via `kagglehub` automatically
-- Extract time-domain and frequency-domain features from raw vibration signals
-- Train the same 4-model suite on bearing degradation data
-- Run MILP scheduling and Monte Carlo simulation
-- Produce showcase-ready, consistent visualizations
+Run these three commands in order:
+
+```bash
+# 1. Train all models (downloads NASA C-MAPSS dataset automatically)
+python scripts/train_all.py
+
+# 2. Score all engines and generate maintenance recommendations
+python scripts/run_pipeline.py
+
+# 3. Launch dashboard to view updated results
+streamlit run dashboard/app.py
+```
+
+**What each step does:**
+
+| Step | Command | Output |
+|------|---------|--------|
+| Train | `train_all.py` | Model weights in `models/saved/`, preprocessed sequences in `data/processed/`, synthetic maintenance logs in `data/synthetic/` |
+| Inference | `run_pipeline.py` | `data/processed/recommendations.csv` (per-engine risk + schedule) |
+| Dashboard | `streamlit run` | Reads all outputs above and displays them |
+
+**Training time:** ~5 minutes on CPU. Significantly faster on GPU.
+
+For GPU support, install CUDA-enabled PyTorch first:
+```bash
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu126
+```
+
+---
+
+### Path B — Jupyter notebook (IMS Bearing vibration dataset)
+
+The notebooks run the same 4-model pipeline on NASA IMS Bearing data (accelerometer signals from 3 bearing degradation experiments).
+
+```bash
+# Install Jupyter if not already available
+pip install jupyter
+
+# Open the notebook
+jupyter notebook notebooks/Smart_Industrial_Maintenance_Repo_Pipeline.ipynb
+```
+
+- `Smart_Industrial_Maintenance_Repo_Pipeline.ipynb` — uses local `src/` imports (requires this repo)
+- `Smart_Industrial_Maintenance_Standalone_Pipeline.ipynb` — fully self-contained, no local imports needed
+
+Both notebooks download the NASA IMS Bearing dataset (~2 GB) automatically via `kagglehub`. Kaggle credentials are required — place your `kaggle.json` in `~/.kaggle/`.
 
 Alternatively, train via script:
 ```bash
 python scripts/train_ims.py
-# OR
-make train-ims
 ```
+
+> **Note:** The notebooks train IMS bearing models and save them to `models/saved/ims_*.pt/.pkl`. They do not overwrite the C-MAPSS models or `recommendations.csv`, so the main dashboard is unaffected.
 
 ---
 
@@ -171,7 +211,7 @@ make train-ims
 ## Project Structure
 
 ```
-Capstone-Project/
+Smart-Industrial-Maintenance-System/
 │
 ├── config.py                        # All settings: paths, hyperparameters, constants
 ├── pyproject.toml                   # Python packaging (pip install -e .)

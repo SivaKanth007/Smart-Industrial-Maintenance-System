@@ -1,0 +1,21 @@
+machine,risk_score,risk_level,action,scheduled_slot
+Engine-01,0.0,Continue Monitoring,Continue Monitoring,nan
+Engine-02,0.0703,Continue Monitoring,Continue Monitoring,0.0
+Engine-03,0.9732,Service Immediately,Service Immediately,0.0
+Engine-04,0.0,Continue Monitoring,Continue Monitoring,nan
+Engine-05,0.0,Continue Monitoring,Continue Monitoring,nan
+Engine-06,0.0262,Continue Monitoring,Continue Monitoring,nan
+Engine-07,0.0106,Continue Monitoring,Continue Monitoring,nan
+Engine-08,0.0,Continue Monitoring,Continue Monitoring,nan
+Engine-09,0.0,Continue Monitoring,Continue Monitoring,nan
+Engine-10,0.0002,Continue Monitoring,Continue Monitoring,nan
+Engine-11,0.0,Continue Monitoring,Continue Monitoring,nan
+Engine-12,0.0906,Continue Monitoring,Continue Monitoring,1.0
+Engine-13,0.0,Continue Monitoring,Continue Monitoring,nan
+Engine-14,0.0001,Continue Monitoring,Continue Monitoring,nan
+Engine-15,0.0,Continue Monitoring,Continue Monitoring,nan
+Engine-16,0.0,Continue Monitoring,Continue Monitoring,nan
+Engine-17,0.0,Continue Monitoring,Continue Monitoring,nan
+Engine-18,0.9841,Service Immediately,Service Immediately,0.0
+Engine-19,0.0,Continue Monitoring,Continue Monitoring,nan
+Engine-20,0.0,Continue Monitoring,Continue Monitoring,nan

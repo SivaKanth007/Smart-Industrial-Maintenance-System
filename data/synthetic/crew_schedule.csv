@@ -1,0 +1,11 @@
+time_slot,shift_type,available_crews,overtime_available
+0,morning,3,False
+1,afternoon,3,True
+2,night,3,False
+3,morning,3,True
+4,afternoon,3,True
+5,night,3,False
+6,morning,3,False
+7,afternoon,3,False
+8,night,3,True
+9,morning,3,False
