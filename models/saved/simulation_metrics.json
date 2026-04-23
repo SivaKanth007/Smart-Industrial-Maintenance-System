@@ -1,0 +1,32 @@
+{
+  "n_simulations": 50,
+  "n_machines": 50,
+  "n_periods": 100,
+  "policies": {
+    "reactive": {
+      "avg_total_cost": 7446400.0,
+      "avg_downtime_hours": 744.64,
+      "availability_pct": 99.37946666666667,
+      "avg_failures": 46.54,
+      "preventive_actions": 0.0
+    },
+    "scheduled": {
+      "avg_total_cost": 2008800.0,
+      "avg_downtime_hours": 770.88,
+      "availability_pct": 99.35759999999999,
+      "avg_failures": 10.68,
+      "preventive_actions": 150.0
+    },
+    "optimized": {
+      "avg_total_cost": 181464.0,
+      "avg_downtime_hours": 204.68,
+      "availability_pct": 99.82943333333334,
+      "avg_failures": 0.39,
+      "preventive_actions": 49.61
+    }
+  },
+  "cost_reduction_pct": 97.6,
+  "downtime_reduction_pct": 72.5,
+  "failure_reduction_pct": 99.2,
+  "availability_gain_pp": 0.4
+}

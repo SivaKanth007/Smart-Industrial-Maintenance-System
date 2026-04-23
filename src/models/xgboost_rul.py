@@ -111,6 +111,13 @@ class XGBoostRUL:
         """Predict RUL for input features."""
         if self.model is None:
             raise RuntimeError("Model not trained. Call train() first.")
+
+        # Avoid GPU/CPU mismatch fallback warning when input is NumPy/pandas on CPU.
+        try:
+            self.model.get_booster().set_param({"device": "cpu"})
+        except Exception:
+            pass
+
         X_arr = X.values if isinstance(X, pd.DataFrame) else X
         predictions = self.model.predict(X_arr)
         # Clip predictions to valid range

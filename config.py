@@ -5,7 +5,6 @@ Central configuration for paths, hyperparameters, and constants.
 """
 
 import os
-import psutil
 import torch
 
 # =============================================================================
@@ -27,77 +26,11 @@ for d in [RAW_DATA_DIR, PROCESSED_DATA_DIR, SYNTHETIC_DATA_DIR, MODELS_DIR]:
 # =============================================================================
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-def _get_available_memory_gb():
-    """Return (gpu_vram_gb or None, system_ram_gb)."""
-    ram_gb = psutil.virtual_memory().available / (1024 ** 3)
-    vram_gb = None
-    if torch.cuda.is_available():
-        props = torch.cuda.get_device_properties(0)
-        vram_gb = props.total_memory / (1024 ** 3)
-    return vram_gb, ram_gb
-
-def _auto_batch_size(memory_gb, is_gpu=True):
-    """Pick batch size to utilise available memory without OOM.
-
-    Heuristic tiers (conservative — leaves headroom for optimizer states,
-    activations, and other processes):
-      <=2 GB  → 16
-      <=4 GB  → 32
-      <=6 GB  → 64
-      <=8 GB  → 128
-      <=12 GB → 256
-      <=16 GB → 512
-      >16 GB  → 1024
-    CPU/RAM uses the same tiers but with 2× the thresholds (RAM is shared
-    with the OS so we need more headroom).
-    """
-    if not is_gpu:
-        memory_gb = memory_gb / 2  # be conservative on shared RAM
-
-    if memory_gb <= 2:
-        return 16
-    elif memory_gb <= 4:
-        return 32
-    elif memory_gb <= 6:
-        return 64
-    elif memory_gb <= 8:
-        return 128
-    elif memory_gb <= 12:
-        return 256
-    elif memory_gb <= 16:
-        return 512
-    else:
-        return 1024
-
-def _auto_hidden_dim(memory_gb, is_gpu=True):
-    """Scale LSTM hidden dimension with available memory."""
-    if not is_gpu:
-        memory_gb = memory_gb / 2
-    if memory_gb <= 2:
-        return 32
-    elif memory_gb <= 4:
-        return 64
-    elif memory_gb <= 8:
-        return 128
-    else:
-        return 256
-
-def _auto_num_workers():
-    """DataLoader num_workers: leave 1-2 cores free for the OS."""
-    cpus = os.cpu_count() or 1
-    return max(0, min(cpus - 2, 4))
-
-def print_system_info():
-    """Print device and GPU/RAM information. Call explicitly when needed."""
-    vram_gb, ram_gb = _get_available_memory_gb()
-    print(f"[CONFIG] Using device: {DEVICE}")
-    print(f"[CONFIG] System RAM available: {ram_gb:.1f} GB")
-    if torch.cuda.is_available() and vram_gb is not None:
-        print(f"[CONFIG] GPU: {torch.cuda.get_device_name(0)}")
-        print(f"[CONFIG] VRAM: {vram_gb:.1f} GB")
-    print(f"[CONFIG] Auto batch size: {AE_BATCH_SIZE} (AE) / {PRED_BATCH_SIZE} (Pred)")
-    print(f"[CONFIG] Auto hidden dim: {AE_HIDDEN_DIM} (AE) / {PRED_HIDDEN_DIM} (Pred)")
-    print(f"[CONFIG] DataLoader workers: {NUM_WORKERS}")
+# =============================================================================
+# DataLoader Configuration
+# =============================================================================
+NUM_WORKERS = 2
+PIN_MEMORY = torch.cuda.is_available()  # pin_memory speeds up GPU transfers
 
 # =============================================================================
 # C-MAPSS Dataset Configuration
@@ -147,37 +80,60 @@ ROLLING_WINDOWS = [5, 10, 20]  # Windows for rolling statistics
 ROLLING_STATS = ["mean", "std", "min", "max"]
 
 # =============================================================================
-# Auto-tuned Hardware Parameters
+# Random Seed
 # =============================================================================
-_VRAM_GB, _RAM_GB = _get_available_memory_gb()
-_IS_GPU = _VRAM_GB is not None
-_MEM_GB = _VRAM_GB if _IS_GPU else _RAM_GB
-_AUTO_BATCH = _auto_batch_size(_MEM_GB, is_gpu=_IS_GPU)
-_AUTO_HIDDEN = _auto_hidden_dim(_MEM_GB, is_gpu=_IS_GPU)
-NUM_WORKERS = _auto_num_workers()
-PIN_MEMORY = _IS_GPU  # pin_memory speeds up GPU transfers
+RANDOM_SEED = 42
+
+def print_system_info():
+    """Print device and configuration information."""
+    print(f"[CONFIG] Using device: {DEVICE}")
+    print(f"[CONFIG] Batch size: {AE_BATCH_SIZE} (AE) / {PRED_BATCH_SIZE} (Pred)")
+    print(f"[CONFIG] Hidden dim: {AE_HIDDEN_DIM} (AE) / {PRED_HIDDEN_DIM} (Pred)")
+    print(f"[CONFIG] DataLoader workers: {NUM_WORKERS}")
+
+# =============================================================================
+# IMS Bearing Dataset Configuration
+# =============================================================================
+IMS_DATASET = "ucirvine/pronostico-de-roturas"  # Kaggle dataset identifier
+
+# =============================================================================
+# XGBoost Parameters
+# =============================================================================
+XGB_PARAMS = {
+    "n_estimators": 100,
+    "max_depth": 6,
+    "learning_rate": 0.1,
+    "subsample": 0.8,
+    "colsample_bytree": 0.8,
+    "random_state": RANDOM_SEED,
+}
+
+# Set GPU if available
+if torch.cuda.is_available():
+    XGB_PARAMS["device"] = "cuda"
+    XGB_PARAMS["tree_method"] = "hist"
 
 # =============================================================================
 # LSTM Autoencoder (Anomaly Detection)
 # =============================================================================
-AE_HIDDEN_DIM = _AUTO_HIDDEN
-AE_LATENT_DIM = max(16, _AUTO_HIDDEN // 2)
+AE_HIDDEN_DIM = 128
+AE_LATENT_DIM = max(16, AE_HIDDEN_DIM // 2)
 AE_NUM_LAYERS = 2
 AE_DROPOUT = 0.2
 AE_LEARNING_RATE = 1e-3
-AE_EPOCHS = 50
-AE_BATCH_SIZE = _AUTO_BATCH
+AE_EPOCHS = 100
+AE_BATCH_SIZE = 64
 AE_ANOMALY_THRESHOLD_SIGMA = 3.0  # mean + 3*sigma
 
 # =============================================================================
 # LSTM Failure Predictor
 # =============================================================================
-PRED_HIDDEN_DIM = _AUTO_HIDDEN
-PRED_NUM_LAYERS = 2
-PRED_DROPOUT = 0.3
+PRED_HIDDEN_DIM = 256
+PRED_NUM_LAYERS = 3
+PRED_DROPOUT = 0.4
 PRED_LEARNING_RATE = 1e-3
 PRED_EPOCHS = 50
-PRED_BATCH_SIZE = _AUTO_BATCH
+PRED_BATCH_SIZE = 32
 PRED_FAILURE_HORIZON = 30    # Predict failure within h cycles
 
 # =============================================================================

@@ -29,6 +29,7 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
 
 import config
+from src.evaluation.dashboard_metrics import load_dashboard_metrics
 
 # ============================================================================
 # Page Configuration
@@ -165,6 +166,12 @@ def load_data():
         data["recommendations"] = pd.read_csv(rec_path)
 
     return data
+
+
+@st.cache_data
+def load_metrics():
+    """Load dashboard metrics from the latest training run."""
+    return load_dashboard_metrics() or {}
 
 
 @st.cache_resource
@@ -508,18 +515,36 @@ def render_model_performance(data):
     st.header("Model Performance")
     st.markdown("Live performance metrics from trained models on the NASA C-MAPSS test set.")
 
+    m = load_metrics()
+    ae = m.get("autoencoder", {})
+    pred = m.get("predictor", {})
+    xgb = m.get("xgboost", {})
+    surv = m.get("survival", {})
+    sim = m.get("simulation", {})
+
+    if not m:
+        st.warning("No metrics found. Run the training pipeline first to populate this page.")
+        st.code("python scripts/train_all.py", language="bash")
+        return
+
+    # Helper for safe formatting
+    def _fmt(val, fmt=".3f", suffix=""):
+        if val is None:
+            return "N/A"
+        return f"{val:{fmt}}{suffix}"
+
     # ── Summary Metrics Row ────────────────────────────────────────────────
     st.subheader("System-Wide Summary")
     c1, c2, c3, c4, c5, c6 = st.columns(6)
-    metrics = [
-        ("F1-Score", "0.933", "#00d2ff"),
-        ("AUC-ROC", "0.997", "#00d2ff"),
-        ("RMSE", "10.48 cy", "#00d2ff"),
-        ("R²", "0.937", "#00d2ff"),
-        ("C-Index", "0.992", "#00d2ff"),
-        ("Cost Save", "97.4%", "#44BB44"),
+    summary_metrics = [
+        ("F1-Score", _fmt(pred.get("f1"), ".3f"), "#00d2ff"),
+        ("AUC-ROC", _fmt(pred.get("auc"), ".3f"), "#00d2ff"),
+        ("RMSE", _fmt(xgb.get("rmse"), ".2f", " cy"), "#00d2ff"),
+        ("R²", _fmt(xgb.get("r2"), ".3f"), "#00d2ff"),
+        ("C-Index", _fmt(surv.get("concordance_index"), ".3f"), "#00d2ff"),
+        ("Cost Save", _fmt(sim.get("cost_reduction_pct"), ".1f", "%"), "#44BB44"),
     ]
-    for col, (label, val, color) in zip([c1, c2, c3, c4, c5, c6], metrics):
+    for col, (label, val, color) in zip([c1, c2, c3, c4, c5, c6], summary_metrics):
         with col:
             st.markdown(f"""
             <div class="metric-card">
@@ -533,56 +558,65 @@ def render_model_performance(data):
     st.subheader("Per-Model Breakdown")
     col1, col2 = st.columns(2)
 
+    ae_arch = (f"{ae.get('num_layers', 2)}-layer LSTM "
+               f"({ae.get('input_dim', '?')} → {ae.get('hidden_dim', '?')} → "
+               f"{ae.get('latent_dim', '?')} latent → {ae.get('hidden_dim', '?')} → "
+               f"{ae.get('input_dim', '?')})")
+
     with col1:
-        st.markdown("""
+        st.markdown(f"""
         <div class="model-card">
             <div class="model-title">LSTM Temporal Autoencoder — Anomaly Detection</div>
-            <div class="model-metric">Architecture: <span>2-layer LSTM (14 → 64 → 32 latent → 64 → 14)</span></div>
-            <div class="model-metric">Training Loss (final): <span>0.005457</span></div>
-            <div class="model-metric">Validation Loss (best): <span>0.005405</span></div>
-            <div class="model-metric">Anomaly Threshold (μ + 3σ): <span>0.006799</span></div>
-            <div class="model-metric">Test Anomaly Rate: <span>14.17%</span></div>
-            <div class="model-metric">Training Samples (healthy): <span>7,876</span></div>
-            <div class="model-metric">Epochs: <span>50</span></div>
+            <div class="model-metric">Architecture: <span>{ae_arch}</span></div>
+            <div class="model-metric">Training Loss (final): <span>{_fmt(ae.get('train_loss_final'), '.6f')}</span></div>
+            <div class="model-metric">Validation Loss (best): <span>{_fmt(ae.get('val_loss_best'), '.6f')}</span></div>
+            <div class="model-metric">Anomaly Threshold (μ + {ae.get('anomaly_threshold_sigma', '?')}σ): <span>{_fmt(ae.get('anomaly_threshold'), '.6f')}</span></div>
+            <div class="model-metric">Test Anomaly Rate: <span>{_fmt(ae.get('test_anomaly_rate'), '.2%') if ae.get('test_anomaly_rate') is not None else 'N/A'}</span></div>
+            <div class="model-metric">Training Samples (healthy): <span>{ae.get('training_samples', 'N/A'):,}</span></div>
+            <div class="model-metric">Epochs: <span>{ae.get('epochs', 'N/A')}</span></div>
         </div>
         """, unsafe_allow_html=True)
 
-        st.markdown("""
+        st.markdown(f"""
         <div class="model-card">
             <div class="model-title">XGBoost RUL Regressor — Remaining Useful Life</div>
-            <div class="model-metric">Features: <span>200+ engineered (rolling, trend, lag, interaction)</span></div>
-            <div class="model-metric">RMSE: <span>10.48 cycles</span></div>
-            <div class="model-metric">MAE: <span>7.04 cycles</span></div>
-            <div class="model-metric">R²: <span>0.937</span></div>
-            <div class="model-metric">Within ±10 cycles: <span>73.6%</span></div>
-            <div class="model-metric">Within ±20 cycles: <span>91.5%</span></div>
-            <div class="model-metric">Trees: <span>200 | Max Depth: 6 | LR: 0.1</span></div>
+            <div class="model-metric">Features: <span>{xgb.get('n_features', '?')}+ engineered (rolling, trend, lag, interaction)</span></div>
+            <div class="model-metric">RMSE: <span>{_fmt(xgb.get('rmse'), '.2f')} cycles</span></div>
+            <div class="model-metric">MAE: <span>{_fmt(xgb.get('mae'), '.2f')} cycles</span></div>
+            <div class="model-metric">R²: <span>{_fmt(xgb.get('r2'), '.3f')}</span></div>
+            <div class="model-metric">Within ±10 cycles: <span>{_fmt(xgb.get('within_10_pct'), '.1f')}%</span></div>
+            <div class="model-metric">Within ±20 cycles: <span>{_fmt(xgb.get('within_20_pct'), '.1f')}%</span></div>
+            <div class="model-metric">Trees: <span>{xgb.get('n_estimators', '?')} | Max Depth: {xgb.get('max_depth', '?')} | LR: {xgb.get('learning_rate', '?')}</span></div>
         </div>
         """, unsafe_allow_html=True)
 
+    pred_arch = (f"{pred.get('num_layers', 2)}-layer LSTM "
+                 f"({pred.get('input_dim', '?')} → {pred.get('hidden_dim', '?')}) "
+                 f"+ Tanh Attention + Dense")
+
     with col2:
-        st.markdown("""
+        st.markdown(f"""
         <div class="model-card">
             <div class="model-title">LSTM Classifier + Attention — Failure Prediction</div>
-            <div class="model-metric">Architecture: <span>2-layer LSTM (14 → 64) + Tanh Attention + Dense</span></div>
-            <div class="model-metric">F1-Score: <span>0.933</span></div>
-            <div class="model-metric">AUC-ROC: <span>0.997</span></div>
-            <div class="model-metric">Precision: <span>0.912</span></div>
-            <div class="model-metric">Recall: <span>0.955</span></div>
-            <div class="model-metric">Training Samples: <span>12,286</span></div>
+            <div class="model-metric">Architecture: <span>{pred_arch}</span></div>
+            <div class="model-metric">F1-Score: <span>{_fmt(pred.get('f1'), '.3f')}</span></div>
+            <div class="model-metric">AUC-ROC: <span>{_fmt(pred.get('auc'), '.3f')}</span></div>
+            <div class="model-metric">Precision: <span>{_fmt(pred.get('precision'), '.3f')}</span></div>
+            <div class="model-metric">Recall: <span>{_fmt(pred.get('recall'), '.3f')}</span></div>
+            <div class="model-metric">Training Samples: <span>{pred.get('training_samples', 'N/A'):,}</span></div>
             <div class="model-metric">Class Weight (positive): <span>dynamic min(neg/pos, 20×)</span></div>
         </div>
         """, unsafe_allow_html=True)
 
-        st.markdown("""
+        st.markdown(f"""
         <div class="model-card">
             <div class="model-title">Bayesian Weibull Survival — Uncertainty Quantification</div>
             <div class="model-metric">Model: <span>Weibull AFT (Accelerated Failure Time)</span></div>
-            <div class="model-metric">Concordance Index (C-Index): <span>0.992</span></div>
-            <div class="model-metric">AIC: <span>2585.42</span></div>
-            <div class="model-metric">Log-Likelihood: <span>−1276.71</span></div>
+            <div class="model-metric">Concordance Index (C-Index): <span>{_fmt(surv.get('concordance_index'), '.3f')}</span></div>
+            <div class="model-metric">AIC: <span>{_fmt(surv.get('aic'), '.2f')}</span></div>
+            <div class="model-metric">Log-Likelihood: <span>{_fmt(surv.get('log_likelihood'), '.2f')}</span></div>
             <div class="model-metric">Confidence Levels: <span>90% and 95% credible intervals</span></div>
-            <div class="model-metric">Covariates: <span>14 active sensor channels</span></div>
+            <div class="model-metric">Covariates: <span>{surv.get('n_covariates', '?')} active sensor channels</span></div>
         </div>
         """, unsafe_allow_html=True)
 
@@ -592,14 +626,18 @@ def render_model_performance(data):
     st.subheader("Normalized Performance Comparison")
     st.caption("All metrics normalized to [0, 1] for visual comparison (higher = better).")
 
+    ae_score = 1 - (ae.get("test_anomaly_rate") or 0)
+    pred_score = pred.get("f1") or 0
+    xgb_score = xgb.get("r2") or 0
+    surv_score = surv.get("concordance_index") or 0
+
     model_names = [
         "LSTM Autoencoder\n(Anomaly)",
         "LSTM Predictor\n(Failure Prob)",
         "XGBoost\n(RUL R²)",
         "Bayesian Survival\n(C-Index)",
     ]
-    # Scores normalized: AE uses (1 - anomaly_rate/100), predictor uses F1, XGBoost uses R², survival uses C-Index
-    scores = [1 - 0.1417, 0.933, 0.937, 0.992]
+    scores = [ae_score, pred_score, xgb_score, surv_score]
     colors = ["#3a7bd5", "#e056a0", "#f0a500", "#44BB44"]
 
     fig = go.Figure(go.Bar(
@@ -623,16 +661,43 @@ def render_model_performance(data):
     st.divider()
 
     # ── Monte Carlo Simulation Results ─────────────────────────────────────
+    sim_policies = sim.get("policies", {})
+    reactive = sim_policies.get("reactive", {})
+    scheduled = sim_policies.get("scheduled", {})
+    optimized = sim_policies.get("optimized", {})
+
     st.subheader("Monte Carlo Simulation — Policy Comparison")
-    st.caption("50 Monte Carlo repetitions, 50 machines, 100 time periods.")
+    st.caption(f"{sim.get('n_simulations', '?')} Monte Carlo repetitions, "
+               f"{sim.get('n_machines', '?')} machines, "
+               f"{sim.get('n_periods', '?')} time periods.")
 
     sim_data = pd.DataFrame({
         "Policy": ["Reactive", "Scheduled (every 30)", "Risk-Based (Optimized)"],
-        "Avg Total Cost ($)": [7_459_200, 2_079_200, 192_496],
-        "Avg Downtime (hrs)": [745.92, 777.92, 205.52],
-        "Availability (%)": [38, 35, 83],
-        "Avg Failures": [46.62, 11.12, 0.46],
-        "Preventive Actions": [0.0, 150.0, 49.54],
+        "Avg Total Cost ($)": [
+            reactive.get("avg_total_cost", 0),
+            scheduled.get("avg_total_cost", 0),
+            optimized.get("avg_total_cost", 0),
+        ],
+        "Avg Downtime (hrs)": [
+            reactive.get("avg_downtime_hours", 0),
+            scheduled.get("avg_downtime_hours", 0),
+            optimized.get("avg_downtime_hours", 0),
+        ],
+        "Availability (%)": [
+            reactive.get("availability_pct", 0),
+            scheduled.get("availability_pct", 0),
+            optimized.get("availability_pct", 0),
+        ],
+        "Avg Failures": [
+            reactive.get("avg_failures", 0),
+            scheduled.get("avg_failures", 0),
+            optimized.get("avg_failures", 0),
+        ],
+        "Preventive Actions": [
+            reactive.get("preventive_actions", 0),
+            scheduled.get("preventive_actions", 0),
+            optimized.get("preventive_actions", 0),
+        ],
     })
     st.dataframe(
         sim_data.style.highlight_min(subset=["Avg Total Cost ($)", "Avg Downtime (hrs)", "Avg Failures"], color="rgba(68,187,68,0.3)")
@@ -671,10 +736,10 @@ def render_model_performance(data):
     st.subheader("Business Impact — Optimized vs Reactive")
     bi_col1, bi_col2, bi_col3, bi_col4 = st.columns(4)
     impact = [
-        ("Cost Reduction", "97.4%", "#44BB44"),
-        ("Downtime Reduction", "72.4%", "#44BB44"),
-        ("Failure Reduction", "99.0%", "#44BB44"),
-        ("Availability Gain", "+45 pp", "#44BB44"),
+        ("Cost Reduction", f"{sim.get('cost_reduction_pct', 0):.1f}%", "#44BB44"),
+        ("Downtime Reduction", f"{sim.get('downtime_reduction_pct', 0):.1f}%", "#44BB44"),
+        ("Failure Reduction", f"{sim.get('failure_reduction_pct', 0):.1f}%", "#44BB44"),
+        ("Availability Gain", f"+{sim.get('availability_gain_pp', 0):.0f} pp", "#44BB44"),
     ]
     for col, (label, val, color) in zip([bi_col1, bi_col2, bi_col3, bi_col4], impact):
         with col:
@@ -691,6 +756,12 @@ def render_model_performance(data):
 def render_explainability(data):
     st.header("Explainability & AI Insights")
     st.markdown("Interpretability tools for reliability engineers to validate model predictions and identify root causes.")
+
+    m = load_metrics()
+    ae = m.get("autoencoder", {})
+    pred = m.get("predictor", {})
+    xgb_m = m.get("xgboost", {})
+    surv = m.get("survival", {})
 
     xgb_model = load_xgboost_model()
 
@@ -717,36 +788,25 @@ def render_explainability(data):
                               height=500, coloraxis_showscale=False)
             st.plotly_chart(fig, use_container_width=True)
         else:
-            # Fallback: use known top features from training results
-            st.caption("Displaying results from the most recent training run.")
-            known_features = [
-                ("sensor_2_roll10_mean", 0.0069),
-                ("sensor_9_roll10_min", 0.0061),
-                ("sensor_4_roll20_mean", 0.0128),
-                ("sensor_11_roll20_max", 0.0155),
-                ("sensor_4_roll5_std", 0.0180),
-                ("sensor_11_roll5_std", 0.0192),
-                ("sensor_4_roll10_mean", 0.0198),
-                ("sensor_11_roll10_mean", 0.0215),
-                ("sensor_4_trend10", 0.0223),
-                ("sensor_11_trend10", 0.0228),
-                ("sensor_4_roll10_std", 0.0229),
-                ("sensor_11_roll10_std", 0.0230),
-                ("sensor_4_roll10_max", 0.0231),
-                ("sensor_11_roll10_max", 0.0310),
-            ]
-            fi_df = pd.DataFrame(known_features, columns=["Feature", "Importance"])
+            # Fallback: use saved metrics from the most recent training run
+            top15 = xgb_m.get("feature_importance_top15", [])
+            if top15:
+                st.caption("Displaying results from the most recent training run.")
+                fi_df = pd.DataFrame(top15).rename(columns={"feature": "Feature", "importance": "Importance"})
+                fi_df = fi_df.sort_values("Importance")
 
-            fig = px.bar(
-                fi_df, x="Importance", y="Feature",
-                orientation="h",
-                title="Top 14 Features by XGBoost Gain Importance",
-                color="Importance",
-                color_continuous_scale="Blues",
-            )
-            fig.update_layout(template="plotly_dark", plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
-                              height=500, coloraxis_showscale=False)
-            st.plotly_chart(fig, use_container_width=True)
+                fig = px.bar(
+                    fi_df, x="Importance", y="Feature",
+                    orientation="h",
+                    title=f"Top {len(fi_df)} Features by XGBoost Gain Importance",
+                    color="Importance",
+                    color_continuous_scale="Blues",
+                )
+                fig.update_layout(template="plotly_dark", plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+                                  height=500, coloraxis_showscale=False)
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("No feature importance data available. Run training pipeline first.")
 
         st.markdown("""
         <div class="insight-box">
@@ -831,23 +891,31 @@ def render_explainability(data):
     with tabs[2]:
         st.subheader("LSTM Autoencoder — Anomaly Detection Behavior")
 
+        ae_val_loss = ae.get("val_loss_best")
+        ae_threshold = ae.get("anomaly_threshold")
+        ae_anomaly_rate = ae.get("test_anomaly_rate")
+        ae_sigma = ae.get("anomaly_threshold_sigma", "?")
+
         col1, col2, col3 = st.columns(3)
         with col1:
-            st.markdown("""
+            val_display = f"{ae_val_loss:.4f}" if ae_val_loss is not None else "N/A"
+            st.markdown(f"""
             <div class="metric-card">
-                <div class="metric-value">0.0054</div>
+                <div class="metric-value">{val_display}</div>
                 <div class="metric-label">Avg Reconstruction Error (healthy)</div>
             </div>""", unsafe_allow_html=True)
         with col2:
-            st.markdown("""
+            thresh_display = f"{ae_threshold:.4f}" if ae_threshold is not None else "N/A"
+            st.markdown(f"""
             <div class="metric-card">
-                <div class="metric-value" style="background:linear-gradient(135deg,#FF4444,#FF6B6B);-webkit-background-clip:text;">0.0068</div>
-                <div class="metric-label">Anomaly Threshold (μ + 3σ)</div>
+                <div class="metric-value" style="background:linear-gradient(135deg,#FF4444,#FF6B6B);-webkit-background-clip:text;">{thresh_display}</div>
+                <div class="metric-label">Anomaly Threshold (μ + {ae_sigma}σ)</div>
             </div>""", unsafe_allow_html=True)
         with col3:
-            st.markdown("""
+            rate_display = f"{ae_anomaly_rate:.1%}" if ae_anomaly_rate is not None else "N/A"
+            st.markdown(f"""
             <div class="metric-card">
-                <div class="metric-value">14.2%</div>
+                <div class="metric-value">{rate_display}</div>
                 <div class="metric-label">Test Anomaly Rate</div>
             </div>""", unsafe_allow_html=True)
 
@@ -856,18 +924,20 @@ def render_explainability(data):
         # Simulated reconstruction error curve (degradation profile)
         np.random.seed(42)
         cycles = np.arange(1, 201)
-        # Healthy phase: low error; degradation phase: increasing error
-        base_error = 0.0040 + np.random.normal(0, 0.0003, 200)
+        base_healthy = ae_val_loss if ae_val_loss is not None else 0.004
+        base_error = base_healthy + np.random.normal(0, base_healthy * 0.06, 200)
         degradation_start = 140
-        base_error[degradation_start:] += np.linspace(0, 0.0050, 200 - degradation_start)
+        base_error[degradation_start:] += np.linspace(0, base_healthy * 1.25, 200 - degradation_start)
         base_error = np.clip(base_error, 0, None)
 
-        threshold_line = np.full(200, 0.006799)
+        threshold_val = ae_threshold if ae_threshold is not None else 0.007
+        threshold_line = np.full(200, threshold_val)
 
         fig = go.Figure()
         fig.add_trace(go.Scatter(x=cycles, y=base_error, mode="lines", name="Reconstruction Error",
                                  line=dict(color="#3a7bd5", width=1.5)))
-        fig.add_trace(go.Scatter(x=cycles, y=threshold_line, mode="lines", name="Anomaly Threshold (μ+3σ)",
+        fig.add_trace(go.Scatter(x=cycles, y=threshold_line, mode="lines",
+                                 name=f"Anomaly Threshold (μ+{ae_sigma}σ)",
                                  line=dict(color="#FF4444", width=2, dash="dash")))
         fig.add_vrect(x0=degradation_start, x1=200, fillcolor="rgba(255,68,68,0.08)",
                       annotation_text="Anomaly Region", annotation_position="top left",
@@ -883,15 +953,16 @@ def render_explainability(data):
         )
         st.plotly_chart(fig, use_container_width=True)
 
-        st.markdown("""
+        ae_rul_cutoff = config.MAX_RUL * 0.5
+        st.markdown(f"""
         <div class="insight-box">
             <div class="insight-title">How the Autoencoder Works</div>
             <div class="insight-text">
-            The LSTM Autoencoder is trained <em>only on healthy engine data</em> (RUL > 62.5 cycles — top 50% of lifespan).
+            The LSTM Autoencoder is trained <em>only on healthy engine data</em> (RUL > {ae_rul_cutoff:.0f} cycles — top 50% of lifespan).
             It learns to compress and reconstruct normal sensor patterns. When applied to degraded engines,
             it cannot accurately reconstruct the abnormal patterns, resulting in high reconstruction error.
             <br><br>
-            The anomaly threshold is set at <strong>μ + 3σ</strong> of training reconstruction errors (99.7th percentile),
+            The anomaly threshold is set at <strong>μ + {ae_sigma}σ</strong> of reconstruction errors,
             providing a statistically grounded decision boundary with minimal false positives on healthy data.
             </div>
         </div>
@@ -916,34 +987,42 @@ def render_explainability(data):
     with tabs[3]:
         st.subheader("Operator's Guide to AI Predictions")
 
+        ae_thresh_str = f"{ae.get('anomaly_threshold', 0):.6f}" if ae.get("anomaly_threshold") is not None else "N/A"
+        pred_f1_str = f"{pred.get('f1', 0):.3f}" if pred.get("f1") is not None else "N/A"
+        pred_auc_str = f"{pred.get('auc', 0):.3f}" if pred.get("auc") is not None else "N/A"
+        xgb_rmse_str = f"{xgb_m.get('rmse', 0):.2f}" if xgb_m.get("rmse") is not None else "N/A"
+        xgb_w10_str = f"{xgb_m.get('within_10_pct', 0):.1f}" if xgb_m.get("within_10_pct") is not None else "N/A"
+        surv_ci_str = f"{surv.get('concordance_index', 0):.3f}" if surv.get("concordance_index") is not None else "N/A"
+        surv_ci_pct = f"{surv.get('concordance_index', 0) * 100:.1f}" if surv.get("concordance_index") is not None else "N/A"
+
         guide_data = [
             {
                 "Model": "LSTM Autoencoder",
                 "Output": "Anomaly flag (True/False) + reconstruction error score",
-                "Threshold": "Error > 0.006799 → anomaly",
+                "Threshold": f"Error > {ae_thresh_str} → anomaly",
                 "Action": "Flag for inspection; cross-check with failure probability",
-                "Confidence": "High (99.7th percentile threshold on training data)",
+                "Confidence": f"Threshold at μ + {ae.get('anomaly_threshold_sigma', '?')}σ on validation data",
             },
             {
                 "Model": "LSTM Failure Predictor",
-                "Output": "P(failure within 30 cycles) ∈ [0, 1]",
+                "Output": f"P(failure within {config.PRED_FAILURE_HORIZON} cycles) ∈ [0, 1]",
                 "Threshold": "> 0.70 = Critical | 0.40–0.70 = Elevated | < 0.40 = Normal",
                 "Action": "Critical → immediate MILP scheduling | Elevated → next available slot",
-                "Confidence": "F1=0.933, AUC=0.997 on held-out test units",
+                "Confidence": f"F1={pred_f1_str}, AUC={pred_auc_str} on held-out test units",
             },
             {
                 "Model": "XGBoost RUL",
                 "Output": "Estimated cycles remaining until failure",
                 "Threshold": "RUL < 20 → Critical | RUL 20–50 → Elevated",
                 "Action": "Use to prioritize scheduling order and plan parts inventory",
-                "Confidence": "RMSE=10.48 cycles, 73.6% of predictions within ±10 cycles",
+                "Confidence": f"RMSE={xgb_rmse_str} cycles, {xgb_w10_str}% of predictions within ±10 cycles",
             },
             {
                 "Model": "Bayesian Weibull Survival",
                 "Output": "Median time-to-failure + 90%/95% credible intervals",
                 "Threshold": "90% CI lower bound < 10 cycles → urgent",
                 "Action": "Use intervals to decide between immediate vs scheduled maintenance",
-                "Confidence": "C-Index=0.992 (correctly ranks 99.2% of unit pairs by failure order)",
+                "Confidence": f"C-Index={surv_ci_str} (correctly ranks {surv_ci_pct}% of unit pairs by failure order)",
             },
         ]
 
@@ -956,20 +1035,20 @@ def render_explainability(data):
 
         st.divider()
         st.subheader("Risk Score Calculation")
-        st.markdown("""
+        st.markdown(f"""
         <div class="insight-box">
             <div class="insight-title">How the Final Risk Score is Computed</div>
             <div class="insight-text">
             The risk score displayed in Risk Assessment and Maintenance Schedule is computed as:
             <br><br>
-            <code>risk_score = P(failure within 30 cycles)</code>
+            <code>risk_score = P(failure within {config.PRED_FAILURE_HORIZON} cycles)</code>
             <br><br>
             Specifically, the inference pipeline (<em>run_pipeline.py</em>) takes the <strong>latest LSTM Predictor output</strong>
-            for each unit — the failure probability from the most recent 30-cycle window — as the per-unit risk score.
+            for each unit — the failure probability from the most recent {config.SEQUENCE_LENGTH}-cycle window — as the per-unit risk score.
             <br><br>
             The autoencoder anomaly flag serves as a <strong>complementary signal</strong>: units that are flagged anomalous
             but have low failure probability are noted for inspection. The MILP scheduler then uses these risk scores to
-            assign maintenance slots, ensuring all machines with <em>risk_score ≥ 0.70</em> are mandatorily scheduled.
+            assign maintenance slots, ensuring all machines with <em>risk_score ≥ {config.SAFETY_RISK_THRESHOLD}</em> are mandatorily scheduled.
             </div>
         </div>
         """, unsafe_allow_html=True)
@@ -1084,6 +1163,11 @@ def main():
         st.sidebar.caption(f"Device: {config.DEVICE}")
     st.sidebar.caption("FSE 570 Capstone Project")
     st.sidebar.caption("Arizona State University")
+
+    m = load_metrics()
+    if m and m.get("timestamp"):
+        ts = m["timestamp"][:19].replace("T", " ")
+        st.sidebar.caption(f"Metrics updated: {ts}")
 
     data = load_data()
 

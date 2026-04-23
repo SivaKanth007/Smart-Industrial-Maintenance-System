@@ -1,0 +1,148 @@
+{
+  "autoencoder": {
+    "input_dim": 16,
+    "hidden_dim": 128,
+    "latent_dim": 64,
+    "num_layers": 2,
+    "seq_len": 30,
+    "epochs": 100,
+    "train_loss_final": 0.000731455873118647,
+    "val_loss_best": 9.63157497385163e-05,
+    "anomaly_threshold": 0.0008606340852566063,
+    "anomaly_threshold_sigma": 3.0,
+    "test_anomaly_rate": 0.0319916460983482,
+    "test_mean_score": 0.00018859124975278974,
+    "test_max_score": 0.019260292872786522,
+    "training_samples": 94199,
+    "total_train_samples": 138803
+  },
+  "predictor": {
+    "input_dim": 16,
+    "hidden_dim": 256,
+    "num_layers": 3,
+    "epochs": 50,
+    "f1": 0.8513831665685697,
+    "precision": 0.8242165242165242,
+    "recall": 0.8804017041996348,
+    "auc": 0.9830044674264891,
+    "optimal_threshold": 0.62939453125,
+    "training_samples": 138803,
+    "pos_rate": 0.15812338888645172
+  },
+  "xgboost": {
+    "rmse": 17.817176606481805,
+    "mae": 12.426196098327637,
+    "r2": 0.8134188652038574,
+    "within_10_pct": 56.31955649331844,
+    "within_20_pct": 79.03686235571553,
+    "n_features": 269,
+    "n_estimators": 200,
+    "max_depth": 6,
+    "learning_rate": 0.1,
+    "training_samples": 111227,
+    "feature_importance_top15": [
+      {
+        "feature": "sensor_11_roll20_max",
+        "importance": 0.2178814858198166
+      },
+      {
+        "feature": "sensor_13_roll10_max",
+        "importance": 0.06657787412405014
+      },
+      {
+        "feature": "sensor_9_roll5_mean",
+        "importance": 0.06479465961456299
+      },
+      {
+        "feature": "sensor_13_roll5_max",
+        "importance": 0.052596576511859894
+      },
+      {
+        "feature": "sensor_4_roll20_max",
+        "importance": 0.0382644459605217
+      },
+      {
+        "feature": "sensor_9_div_sensor_7",
+        "importance": 0.03332606703042984
+      },
+      {
+        "feature": "sensor_9_roll10_mean",
+        "importance": 0.02327263355255127
+      },
+      {
+        "feature": "sensor_21_roll10_mean",
+        "importance": 0.019898386672139168
+      },
+      {
+        "feature": "sensor_9_div_sensor_12",
+        "importance": 0.018758097663521767
+      },
+      {
+        "feature": "sensor_13_roll20_max",
+        "importance": 0.01512925885617733
+      },
+      {
+        "feature": "sensor_15_roll20_max",
+        "importance": 0.013882610015571117
+      },
+      {
+        "feature": "sensor_9_roll20_max",
+        "importance": 0.013187439180910587
+      },
+      {
+        "feature": "sensor_14_roll20_max",
+        "importance": 0.010264448821544647
+      },
+      {
+        "feature": "sensor_14_roll10_max",
+        "importance": 0.010039446875452995
+      },
+      {
+        "feature": "sensor_9_x_sensor_4",
+        "importance": 0.009858413599431515
+      }
+    ]
+  },
+  "survival": {
+    "concordance_index": 0.9506708745525949,
+    "rmse_failures": 1660583810515.748,
+    "n_events": 107,
+    "n_censored": 24064,
+    "n_covariates": 14,
+    "aic": 5093.071253785531,
+    "log_likelihood": -2530.5356268927653
+  },
+  "simulation": {
+    "n_simulations": 50,
+    "n_machines": 50,
+    "n_periods": 100,
+    "policies": {
+      "reactive": {
+        "avg_total_cost": 7446400.0,
+        "avg_downtime_hours": 744.64,
+        "availability_pct": 99.37946666666667,
+        "avg_failures": 46.54,
+        "preventive_actions": 0.0
+      },
+      "scheduled": {
+        "avg_total_cost": 2008800.0,
+        "avg_downtime_hours": 770.88,
+        "availability_pct": 99.35759999999999,
+        "avg_failures": 10.68,
+        "preventive_actions": 150.0
+      },
+      "optimized": {
+        "avg_total_cost": 181464.0,
+        "avg_downtime_hours": 204.68,
+        "availability_pct": 99.82943333333334,
+        "avg_failures": 0.39,
+        "preventive_actions": 49.61
+      }
+    },
+    "cost_reduction_pct": 97.6,
+    "downtime_reduction_pct": 72.5,
+    "failure_reduction_pct": 99.2,
+    "availability_gain_pp": 0.4
+  },
+  "timestamp": "2026-04-22T20:49:14.254427"
+}

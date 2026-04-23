@@ -24,6 +24,9 @@ from src.models.lstm_predictor import LSTMPredictor, PredictorTrainer
 from src.models.xgboost_rul import XGBoostRUL
 from src.models.bayesian_survival import BayesianSurvival
 from src.evaluation.simulation import MaintenanceSimulator
+from src.evaluation.dashboard_metrics import (
+    save_dashboard_metrics, save_simulation_metrics,
+)
 
 
 def main():
@@ -115,6 +118,9 @@ def main():
     n_features = X_train.shape[2]
     print(f"\n[TRAIN] Feature dimension: {n_features}")
 
+    # Metrics dict — populated incrementally, saved at end
+    dashboard_metrics = {}
+
     # =========================================================================
     # Step 5: Train LSTM Autoencoder
     # =========================================================================
@@ -138,8 +144,27 @@ def main():
     test_scores = autoencoder.compute_anomaly_score(
         torch.FloatTensor(data["test"]["X"])
     )
+    test_anomaly_rate = float(np.mean(test_scores > autoencoder.threshold))
     print(f"[TRAIN] Test anomaly scores: mean={test_scores.mean():.6f}, "
-          f"max={test_scores.max():.6f}, anomaly_rate={np.mean(test_scores > autoencoder.threshold):.2%}")
+          f"max={test_scores.max():.6f}, anomaly_rate={test_anomaly_rate:.2%}")
+
+    dashboard_metrics["autoencoder"] = {
+        "input_dim": n_features,
+        "hidden_dim": autoencoder.hidden_dim,
+        "latent_dim": autoencoder.latent_dim,
+        "num_layers": autoencoder.num_layers,
+        "seq_len": autoencoder.seq_len,
+        "epochs": len(ae_trainer.train_history),
+        "train_loss_final": ae_trainer.train_history[-1] if ae_trainer.train_history else None,
+        "val_loss_best": min(ae_trainer.val_history) if ae_trainer.val_history else None,
+        "anomaly_threshold": float(autoencoder.threshold),
+        "anomaly_threshold_sigma": config.AE_ANOMALY_THRESHOLD_SIGMA,
+        "test_anomaly_rate": test_anomaly_rate,
+        "test_mean_score": float(test_scores.mean()),
+        "test_max_score": float(test_scores.max()),
+        "training_samples": int(len(X_healthy)),
+        "total_train_samples": int(len(X_train)),
+    }
 
     # =========================================================================
     # Step 6: Train LSTM Failure Predictor
@@ -152,6 +177,22 @@ def main():
     pred_trainer = PredictorTrainer(predictor)
     pred_trainer.train(X_train, y_train_binary, X_val, y_val_binary)
     pred_trainer.save_model()
+
+    pred_val_hist = pred_trainer.val_history
+    pred_best = max(pred_val_hist, key=lambda m: m.get("auc", 0)) if pred_val_hist else {}
+    dashboard_metrics["predictor"] = {
+        "input_dim": n_features,
+        "hidden_dim": predictor.hidden_dim,
+        "num_layers": predictor.num_layers,
+        "epochs": len(pred_trainer.train_history),
+        "f1": pred_best.get("f1"),
+        "precision": pred_best.get("precision"),
+        "recall": pred_best.get("recall"),
+        "auc": pred_best.get("auc"),
+        "optimal_threshold": pred_best.get("optimal_threshold"),
+        "training_samples": int(len(X_train)),
+        "pos_rate": float(y_train_binary.sum() / len(y_train_binary)),
+    }
 
     # =========================================================================
     # Step 7: Train XGBoost RUL Model
@@ -182,8 +223,27 @@ def main():
     xgb_model = XGBoostRUL()
     xgb_model.train(X_train_xgb, y_train_xgb.values, X_val_xgb, y_val_xgb.values,
                      feature_names=feature_cols)
-    xgb_model.evaluate(X_val_xgb, y_val_xgb.values)
+    xgb_eval = xgb_model.evaluate(X_val_xgb, y_val_xgb.values)
     xgb_model.save()
+
+    xgb_top15 = []
+    if xgb_model.feature_importance is not None:
+        for _, row in xgb_model.feature_importance.head(15).iterrows():
+            xgb_top15.append({"feature": row["feature"], "importance": float(row["importance"])})
+    dashboard_metrics["xgboost"] = {
+        "rmse": xgb_eval["rmse"],
+        "mae": xgb_eval["mae"],
+        "r2": xgb_eval["r2"],
+        "within_10_pct": xgb_eval["within_10_pct"],
+        "within_20_pct": xgb_eval["within_20_pct"],
+        "nasa_score": xgb_eval["nasa_score"],
+        "n_features": len(feature_cols),
+        "n_estimators": config.XGB_PARAMS.get("n_estimators"),
+        "max_depth": config.XGB_PARAMS.get("max_depth"),
+        "learning_rate": config.XGB_PARAMS.get("learning_rate"),
+        "training_samples": int(len(X_train_xgb)),
+        "feature_importance_top15": xgb_top15,
+    }
 
     # =========================================================================
     # Step 8: Bayesian Survival Analysis
@@ -206,8 +266,22 @@ def main():
     df_survival_val = df_train[df_train["unit_id"].isin(val_units)][
         ["unit_id"] + survival_cols
     ]
-    survival_model.evaluate(df_survival_val)
+    surv_eval = survival_model.evaluate(df_survival_val)
     survival_model.save()
+
+    surv_metrics = {
+        "concordance_index": surv_eval["concordance_index"],
+        "rmse_failures": surv_eval["rmse_failures"],
+        "n_events": surv_eval["n_events"],
+        "n_censored": surv_eval["n_censored"],
+        "n_covariates": len(survival_model.selected_feature_cols or []),
+    }
+    try:
+        surv_metrics["aic"] = float(survival_model.model.AIC_)
+        surv_metrics["log_likelihood"] = float(survival_model.model.log_likelihood_)
+    except Exception:
+        pass
+    dashboard_metrics["survival"] = surv_metrics
 
     # =========================================================================
     # Step 9: Run Simulation
@@ -220,6 +294,14 @@ def main():
     sim_df, sim_summary = simulator.run_comparison(n_simulations=50)
     sim_plot_path = os.path.join(config.MODELS_DIR, "..", "simulation_comparison.png")
     simulator.plot_comparison(sim_df, save_path=sim_plot_path)
+
+    sim_metrics = save_simulation_metrics(sim_df)
+    dashboard_metrics["simulation"] = sim_metrics
+
+    # =========================================================================
+    # Save Dashboard Metrics
+    # =========================================================================
+    save_dashboard_metrics(dashboard_metrics)
 
     # =========================================================================
     # Summary

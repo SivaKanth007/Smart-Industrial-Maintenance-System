@@ -61,8 +61,12 @@ class FeatureEngineer:
                             new_cols[col_name] = pd.Series(dtype=np.float64, index=df.index)
                         new_cols[col_name].loc[idx] = result[col].values
 
-        for col_name, series in new_cols.items():
-            df[col_name] = series
+        if new_cols:
+            rolling_df = pd.DataFrame(new_cols, index=df.index)
+            existing = [c for c in rolling_df.columns if c in df.columns]
+            if existing:
+                df = df.drop(columns=existing)
+            df = pd.concat([df, rolling_df], axis=1)
 
         print(f"[FEATURES] Added {len(new_cols)} rolling features "
               f"({len(windows)} windows × {len(stats)} stats × {len(sensor_cols)} sensors)")
@@ -111,8 +115,12 @@ class FeatureEngineer:
                     new_cols[col_name] = pd.Series(dtype=np.float64, index=df.index)
                 new_cols[col_name].loc[idx] = slopes
 
-        for col_name, series in new_cols.items():
-            df[col_name] = series
+        if new_cols:
+            trend_df = pd.DataFrame(new_cols, index=df.index)
+            existing = [c for c in trend_df.columns if c in df.columns]
+            if existing:
+                df = df.drop(columns=existing)
+            df = pd.concat([df, trend_df], axis=1)
 
         print(f"[FEATURES] Added {len(new_cols)} trend features")
         return df
@@ -121,6 +129,9 @@ class FeatureEngineer:
         """
         Cluster operational settings into regimes using K-Means.
         """
+        # Defragment frame before adding a new column after many feature inserts.
+        df = df.copy()
+
         n_clusters = n_clusters or self.n_regimes
         op_cols = [c for c in df.columns
                    if c.startswith("op_setting_") and c not in config.OP_SETTINGS_TO_DROP]
@@ -157,25 +168,24 @@ class FeatureEngineer:
                        if c.startswith("sensor_") and c not in config.SENSORS_TO_DROP
                        and "roll" not in c and "trend" not in c]
 
-        new_count = 0
-        for unit_id, group in df.groupby("unit_id"):
-            group = group.sort_values("cycle")
-            idx = group.index
+        # Compute lag features in one pass and append once to avoid DataFrame fragmentation.
+        df_sorted = df.sort_values(["unit_id", "cycle"]).copy()
+        lag_frames = []
+        for lag in lags:
+            lag_df = df_sorted.groupby("unit_id")[sensor_cols].shift(lag)
+            lag_df.columns = [f"{col}_lag{lag}" for col in sensor_cols]
+            lag_frames.append(lag_df)
 
-            for lag in lags:
-                for col in sensor_cols:
-                    col_name = f"{col}_lag{lag}"
-                    if col_name not in df.columns:
-                        df[col_name] = np.nan
-                    df.loc[idx, col_name] = group[col].shift(lag).values
-                    new_count += 1
+        if lag_frames:
+            lag_features = pd.concat(lag_frames, axis=1).bfill().fillna(0)
+            existing = [c for c in lag_features.columns if c in df_sorted.columns]
+            if existing:
+                df_sorted = df_sorted.drop(columns=existing)
+            df_sorted = pd.concat([df_sorted, lag_features], axis=1)
 
-        # Fill NaN from lagging with forward fill
-        lag_cols = [c for c in df.columns if "_lag" in c]
-        df[lag_cols] = df[lag_cols].bfill().fillna(0)
-
+        lag_cols = [c for c in df_sorted.columns if "_lag" in c]
         print(f"[FEATURES] Added {len(lag_cols)} lag features ({len(lags)} lags × {len(sensor_cols)} sensors)")
-        return df
+        return df_sorted.sort_index()
 
     def add_sensor_interactions(self, df, top_n=5):
         """
@@ -189,12 +199,20 @@ class FeatureEngineer:
         variances = df[sensor_cols].var().sort_values(ascending=False)
         top_sensors = variances.head(top_n).index.tolist()
 
-        new_count = 0
+        interaction_cols = {}
         for i, s1 in enumerate(top_sensors):
             for s2 in top_sensors[i+1:]:
-                df[f"{s1}_x_{s2}"] = df[s1] * df[s2]
-                df[f"{s1}_div_{s2}"] = df[s1] / (df[s2] + 1e-8)
-                new_count += 2
+                interaction_cols[f"{s1}_x_{s2}"] = df[s1] * df[s2]
+                interaction_cols[f"{s1}_div_{s2}"] = df[s1] / (df[s2] + 1e-8)
+
+        if interaction_cols:
+            interactions_df = pd.DataFrame(interaction_cols, index=df.index)
+            existing = [c for c in interactions_df.columns if c in df.columns]
+            if existing:
+                df = df.drop(columns=existing)
+            df = pd.concat([df, interactions_df], axis=1)
+
+        new_count = len(interaction_cols)
 
         print(f"[FEATURES] Added {new_count} interaction features from top-{top_n} sensors")
         return df

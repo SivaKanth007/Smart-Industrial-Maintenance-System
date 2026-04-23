@@ -15,7 +15,7 @@
 | Urvansh Jignesh Shah | Team Member |
 
 **Course:** FSE 570 — Data Science Capstone  
-**Date:** February 2026
+**Date:** April 2026
 
 ---
 
@@ -45,11 +45,11 @@ This project delivers an **end-to-end maintenance decision support system** that
 Our solution integrates four complementary analytical techniques:
 
 - **LSTM Temporal Autoencoder** for unsupervised anomaly detection
-- **LSTM Classifier with Attention** for failure probability prediction (F1 = 0.933, AUC = 0.997)
-- **XGBoost Regression** for Remaining Useful Life estimation (RMSE = 10.48 cycles, R² = 0.937)
-- **Bayesian Weibull Survival Analysis** for calibrated uncertainty quantification (C-Index = 0.992)
+- **LSTM Classifier with Attention** for failure probability prediction (F1 = 0.851, AUC = 0.983)
+- **XGBoost Regression** for Remaining Useful Life estimation (RMSE = 17.82 cycles, R² = 0.813)
+- **Bayesian Weibull Survival Analysis** for calibrated uncertainty quantification (C-Index = 0.951)
 
-These predictions feed a **Mixed-Integer Linear Programming (MILP)** optimizer that produces crew-constrained maintenance schedules, achieving a **97.4% cost reduction** and **72.4% downtime reduction** compared to reactive maintenance in Monte Carlo simulations.
+These predictions feed a **Mixed-Integer Linear Programming (MILP)** optimizer that produces crew-constrained maintenance schedules, achieving a **97.6% cost reduction** and **72.5% downtime reduction** compared to reactive maintenance in Monte Carlo simulations.
 
 ---
 
@@ -91,14 +91,14 @@ The **Commercial Modular Aero-Propulsion System Simulation (C-MAPSS)** dataset p
 | Attribute | Value |
 |-----------|-------|
 | Source | NASA Prognostics Center of Excellence |
-| Units | 100 engines (FD001 subset) |
+| Units | 709 training engines across FD001-FD004 |
 | Sensors | 21 sensor channels + 3 operational settings |
-| Observations | 20,631 rows |
+| Observations | 160,359 training rows |
 | Cycle range | 1–362 cycles per unit |
 | Sensor types | Temperature, pressure, vibration, speed, power, flow |
 | Labels | Remaining Useful Life (RUL) per time step |
 
-**Operational condition:** Single operating condition, single fault mode (HPC degradation).
+**Operational condition:** Multiple operating conditions and fault modes across FD001-FD004.
 
 ### 3.2 NASA IMS Bearing Dataset
 
@@ -119,8 +119,8 @@ The IMS dataset enables validation of the system on real vibration signals, comp
 
 Two additional synthetic datasets were generated to create a realistic industrial context:
 
-1. **Maintenance & Failure Logs** — Repair history, downtime costs, failure types (bearing fault, imbalance, overheating) for 100 units, totaling 1,600+ log entries
-2. **Operational Context** — Machine specifications, production line assignments, shift schedules, crew availability
+1. **Maintenance & Failure Logs** — Repair history, downtime costs, and failure types for the generated fleet (3,568 entries in the latest run)
+2. **Operational Context** — Machine specifications, production line assignments, and shift schedules (709 entries in the latest run)
 
 ### 3.3 Data Preprocessing Pipeline
 
@@ -134,7 +134,7 @@ The preprocessing pipeline (`src/data/preprocess.py`) applies five transformatio
 | 4 | **Min-max normalization** | Fit on training data only |
 | 5 | **Sliding window** | 30-cycle sequences with stride 1 |
 
-**Result:** 12,286 training / 2,735 validation / 2,710 test sequences, each of shape (30 timesteps × 14 features).
+**Result:** 138,803 training / 21,887 validation / 21,068 test sequences, each of shape (30 timesteps × 16 features).
 
 ### 3.4 Feature Engineering
 
@@ -195,8 +195,7 @@ The system follows a **five-stage pipeline** from raw sensor data to maintenance
 ├── dashboard/
 │   └── app.py                    # Streamlit interactive dashboard
 ├── notebooks/
-│   ├── Smart_Industrial_Maintenance_Repo_Pipeline.ipynb       # IMS bearing pipeline (repo-integrated)
-│   └── Smart_Industrial_Maintenance_Standalone_Pipeline.ipynb # IMS bearing pipeline (self-contained)
+│   └── Smart_Industrial_Maintenance_Repo_Pipeline.ipynb       # IMS bearing pipeline (repo-integrated)
 └── tests/                        # Unit tests (4 modules)
     ├── test_preprocess.py
     ├── test_models.py
@@ -204,7 +203,7 @@ The system follows a **five-stage pipeline** from raw sensor data to maintenance
     └── test_ims.py
 ```
 
-**Total:** 18 source modules, ~120KB of production Python code.
+**Total:** 19 source modules (including `src/evaluation/dashboard_metrics.py`).
 
 ---
 
@@ -218,9 +217,9 @@ The system follows a **five-stage pipeline** from raw sensor data to maintenance
 
 | Component | Configuration |
 |-----------|--------------|
-| Encoder | 2-layer LSTM (14 → hidden → latent) |
-| Decoder | 2-layer LSTM (latent → hidden → 14) |
-| Hidden / Latent dim | Auto-tuned to available GPU/RAM (64/32 on ≤4 GB, 128/64 on ≤8 GB) |
+| Encoder | 2-layer LSTM (16 → hidden → latent) |
+| Decoder | 2-layer LSTM (latent → hidden → 16) |
+| Hidden / Latent dim | 128 / 64 (default config) |
 | Dropout | 0.2 |
 | Loss function | Mean Squared Error (reconstruction) |
 
@@ -236,9 +235,9 @@ The system follows a **five-stage pipeline** from raw sensor data to maintenance
 
 | Component | Configuration |
 |-----------|--------------|
-| LSTM backbone | 2-layer LSTM (14 → hidden dim, auto-tuned) |
+| LSTM backbone | 3-layer LSTM (16 → 256 hidden dim) |
 | Attention mechanism | Tanh attention (hidden → hidden/2 → 1) |
-| Classifier head | Dense (hidden → hidden/2 → 1) + ReLU + Dropout(0.3); sigmoid applied at inference |
+| Classifier head | Dense (hidden → hidden/2 → 1) + ReLU + Dropout(0.4); sigmoid applied at inference |
 | Class balancing | Dynamic pos_weight = min(neg/pos, 20×) via BCEWithLogitsLoss |
 | Output | P(failure within 30 cycles) |
 
@@ -324,7 +323,7 @@ Subject to:
 
 | Component | Technology |
 |-----------|-----------|
-| Core language | Python 3.9+ (tested on 3.11) |
+| Core language | Python 3.9+ (tested on 3.13.7) |
 | Deep learning | PyTorch 2.x |
 | Gradient boosting | XGBoost |
 | Survival analysis | lifelines |
@@ -347,7 +346,7 @@ The training pipeline (`scripts/train_all.py`) executes 9 sequential steps:
 | 2 | Synthetic data generation | ~2s |
 | 3 | Feature engineering | ~5s |
 | 4 | Data preprocessing (windowing) | ~3s |
-| 5 | LSTM Autoencoder training (50 epochs) | ~120s |
+| 5 | LSTM Autoencoder training (100 epochs) | ~240s |
 | 6 | LSTM Predictor training (50 epochs) | ~140s |
 | 7 | XGBoost RUL training (200 trees) | ~5s |
 | 8 | Bayesian Survival fitting | ~3s |
@@ -355,7 +354,7 @@ The training pipeline (`scripts/train_all.py`) executes 9 sequential steps:
 
 *\*Approximate times on CPU (Intel Core i7). GPU training is ~5–10× faster.*
 
-**Total training time:** ~5 minutes on CPU. Using the NVIDIA RTX 3050 Ti Laptop GPU it completes significantly faster!
+**Total training time:** ~7-9 minutes on CPU for full FD001-FD004 training. Using the NVIDIA RTX 3050 Ti Laptop GPU it completes significantly faster.
 
 ### 6.3 Inference Pipeline
 
@@ -384,16 +383,18 @@ The test suite (`tests/`) contains **50 unit tests** across 4 modules:
 
 ## 7. Experimental Results
 
+All metrics in this section are synchronized from `models/saved/dashboard_metrics.json` (latest run timestamp: 2026-04-22T20:49:14) and `models/saved/simulation_metrics.json`.
+
 ### 7.1 LSTM Temporal Autoencoder
 
 | Metric | Value |
 |--------|-------|
-| Training loss (final) | 0.005457 |
-| Validation loss (best) | 0.005405 |
-| Anomaly threshold (μ + 3σ) | 0.006799 |
-| Test anomaly rate | 14.17% |
-| Training samples (healthy) | 7,876 |
-| Epochs | 50 |
+| Training loss (final) | 0.000731 |
+| Validation loss (best) | 0.000096 |
+| Anomaly threshold (μ + 3σ) | 0.000861 |
+| Test anomaly rate | 3.20% |
+| Training samples (healthy) | 94,199 |
+| Epochs | 100 |
 
 The autoencoder successfully learned normal sensor patterns, with the anomaly rate increasing as engines approach failure (correlation with decreasing RUL).
 
@@ -401,63 +402,54 @@ The autoencoder successfully learned normal sensor patterns, with the anomaly ra
 
 | Metric | Value |
 |--------|-------|
-| **F1-Score** | **0.933** |
-| **AUC-ROC** | **0.997** |
-| Precision | 0.912 |
-| Recall | 0.955 |
-| Training samples | 12,286 |
-| Positive rate | 17.66% |
-| Positive class weight | Dynamic min(neg/pos, 20×) ≈ 4.66× for this split |
+| **F1-Score** | **0.851** |
+| **AUC-ROC** | **0.983** |
+| Precision | 0.824 |
+| Recall | 0.880 |
+| Training samples | 138,803 |
+| Positive rate | 15.81% |
+| Positive class weight | Dynamic min(neg/pos, 20×) ≈ 5.32× for this split |
 
-The attention-based LSTM achieved near-perfect AUC (0.997), demonstrating strong ability to distinguish between near-failure and healthy sequences. The F1 of 0.933 reflects an excellent precision-recall balance, critical for minimizing both missed failures and false alarms.
+The attention-based LSTM achieved strong discrimination (AUC 0.983) on the current full-subset run. The F1 of 0.851 reflects a robust precision-recall balance suitable for risk ranking and downstream scheduling.
 
 ### 7.3 XGBoost RUL Estimation
 
 | Metric | Value |
 |--------|-------|
-| **RMSE** | **10.48 cycles** |
-| **MAE** | **7.04 cycles** |
-| **R²** | **0.937** |
+| **RMSE** | **17.82 cycles** |
+| **MAE** | **12.43 cycles** |
+| **R²** | **0.813** |
 | **NASA Asymmetric Score** | Lower is better (penalises late predictions 1.3× more than early) |
-| Within ±10 cycles | 73.6% |
-| Within ±20 cycles | 91.5% |
+| Within ±10 cycles | 56.3% |
+| Within ±20 cycles | 79.0% |
 | Features used | 200+ engineered features |
 
-The XGBoost model explains 93.7% of RUL variance, with nearly three-quarters of predictions falling within ±10 cycles of the true value. The **NASA asymmetric scoring function** (standard C-MAPSS benchmark metric) weights late predictions — where the model overestimates remaining life — more harshly than early predictions, reflecting real-world safety costs of missing a failure. This accuracy level is sufficient for actionable maintenance planning.
+The XGBoost model explains 81.3% of RUL variance on the current run. The **NASA asymmetric scoring function** (standard C-MAPSS benchmark metric) weights late predictions — where the model overestimates remaining life — more harshly than early predictions, reflecting real-world safety costs of missing a failure.
 
 **Top XGBoost Features:**
 
 | Rank | Feature | Importance |
 |------|---------|------------|
-| 1 | sensor_11_roll10_max | 0.0310 |
-| 2 | sensor_4_roll10_max | 0.0231 |
-| 3 | sensor_2_roll10_mean | 0.0069 |
-| 4 | sensor_9_roll10_min | 0.0061 |
+| 1 | sensor_11_roll20_max | 0.2179 |
+| 2 | sensor_13_roll10_max | 0.0666 |
+| 3 | sensor_9_roll5_mean | 0.0648 |
+| 4 | sensor_13_roll5_max | 0.0526 |
 
-Rolling window statistics (particularly 10-cycle window max values of sensors 11 and 4) dominate the feature importance, validating the rolling statistics feature engineering approach.
+Rolling window statistics (especially max/mean aggregates for sensors 11, 13, and 9) dominate the feature importance, validating the rolling-statistics feature engineering approach.
 
 ### 7.4 Bayesian Weibull Survival Analysis
 
 | Metric | Value |
 |--------|-------|
-| **Concordance Index** | **0.992** |
-| AIC | 2585.42 |
-| Log-likelihood | −1276.71 |
-| Event rate (training) | 2.93% |
-| Events observed | 420 |
+| **Concordance Index** | **0.951** |
+| AIC | 5093.07 |
+| Log-likelihood | -2530.54 |
+| Event rate (validation) | 0.44% |
+| Events observed | 107 |
+| Censored observations | 24,064 |
 | Covariates | 14 sensor channels |
 
-**Significant covariates (p < 0.005):**
-
-| Sensor | Coefficient | exp(coef) | Interpretation |
-|--------|------------|-----------|----------------|
-| sensor_15 | −11.112 | 0.000 | Strongest negative survival effect |
-| sensor_11 | −3.908 | 0.020 | Strong degradation indicator |
-| sensor_21 | +3.459 | 31.786 | Positive survival association |
-| sensor_20 | +2.678 | 14.552 | Positive survival association |
-| sensor_12 | +1.209 | 3.349 | Moderate positive effect |
-
-The C-Index of 0.992 indicates near-perfect discriminative ability — the model can correctly rank 99.2% of pairs by their actual time-to-failure.
+The C-Index of 0.951 indicates strong discriminative ability — the model can correctly rank about 95.1% of pairs by their actual time-to-failure. Full coefficient-level inspection remains available directly from the fitted survival artifact (`models/saved/survival_model.pkl`) when needed.
 
 ---
 
@@ -477,20 +469,20 @@ To evaluate the business impact of our system, we developed a Monte Carlo simula
 
 | Policy | Avg. Total Cost | Avg. Downtime (hrs) | Availability | Failures | Preventive Actions |
 |--------|---------------:|--------------------:|------------:|--------:|------------------:|
-| **Optimized (Risk-Based)** | **$192,496** | **205.52** | **83%** | **0.46** | **49.54** |
-| Scheduled (every 30) | $2,079,200 | 777.92 | 35% | 11.12 | 150.00 |
-| Reactive | $7,459,200 | 745.92 | 38% | 46.62 | 0.00 |
+| **Optimized (Risk-Based)** | **$181,464** | **204.68** | **99.83%** | **0.39** | **49.61** |
+| Scheduled (every 30) | $2,008,800 | 770.88 | 99.36% | 10.68 | 150.00 |
+| Reactive | $7,446,400 | 744.64 | 99.38% | 46.54 | 0.00 |
 
 ### 8.3 Business Impact (Optimized vs. Reactive)
 
 | Improvement | Value |
 |-------------|-------|
-| **Cost reduction** | **97.4%** |
-| **Downtime reduction** | **72.4%** |
-| **Failure reduction** | **99.0%** (from 46.62 to 0.46 avg.) |
-| **Availability increase** | **+45 percentage points** (38% → 83%) |
+| **Cost reduction** | **97.6%** |
+| **Downtime reduction** | **72.5%** |
+| **Failure reduction** | **99.2%** (from 46.54 to 0.39 avg.) |
+| **Availability increase** | **+0.4 percentage points** (99.38% → 99.83%) |
 
-The optimized policy nearly eliminates unplanned failures (from 46.62 to 0.46 per simulation) while simultaneously reducing costs by 97.4%. Even compared to scheduled maintenance, the optimized approach reduces costs by 90.7% because it avoids unnecessary preventive actions on healthy machines.
+The optimized policy nearly eliminates unplanned failures (from 46.54 to 0.39 per simulation) while simultaneously reducing costs by 97.6%. Even compared to scheduled maintenance, the optimized approach reduces costs by about 91.0% because it avoids unnecessary preventive actions on healthy machines.
 
 ---
 
@@ -600,7 +592,7 @@ Provides fleet composition by machine type and priority level, a bubble scatter 
 
 1. **Multi-model ensembling outperforms single models.** Combining LSTM anomaly detection, failure prediction, RUL estimation, and survival analysis provides complementary signals that a single model cannot capture alone.
 
-2. **Feature engineering drives XGBoost performance.** The 200+ engineered features (particularly rolling window statistics) enabled XGBoost to achieve R² = 0.937, competitive with deep learning approaches while remaining interpretable.
+2. **Feature engineering drives XGBoost performance.** The 200+ engineered features (particularly rolling window statistics) enabled XGBoost to achieve R² = 0.813 on the current full-subset run while remaining interpretable.
 
 3. **Bayesian uncertainty is crucial for decision making.** The Weibull AFT model's credible intervals allow the MILP optimizer to make risk-aware scheduling decisions, distinguishing between "likely failing, high confidence" and "possibly failing, low confidence" scenarios.
 
@@ -615,6 +607,8 @@ Provides fleet composition by machine type and priority level, a bubble scatter 
 3. **CPU-only training in our environment.** While the system supports GPU acceleration, our primary training was conducted on CPU. GPU training would reduce the ~5-minute runtime further.
 
 4. **Simulation assumptions.** The Monte Carlo simulation uses simplified degradation models. Real-world degradation patterns may exhibit different characteristics.
+
+5. **Current inference saturation.** The latest `recommendations.csv` snapshot shows all 107 evaluated units classified as `Service Immediately` (risk in [0.9967, 1.0]). This is useful for stress-testing the scheduler but indicates calibration drift that should be corrected before production use.
 
 ### 11.3 Technical Challenges & Solutions
 
@@ -634,25 +628,25 @@ Provides fleet composition by machine type and priority level, a bubble scatter 
 
 We have developed and validated an **end-to-end industrial maintenance decision support system** that demonstrates the complete data science lifecycle: from raw sensor ingestion through preprocessing, multi-model machine learning, optimization, and interactive visualization.
 
-The system achieves state-of-the-art results on the NASA C-MAPSS benchmark:
+The system achieves strong results on the current NASA C-MAPSS full-subset run:
 
-- **F1 = 0.933** for failure prediction (LSTM with attention)
-- **RMSE = 10.48 cycles** for RUL estimation (XGBoost)
-- **C-Index = 0.992** for survival analysis (Bayesian Weibull)
-- **97.4% cost reduction** via optimized scheduling (MILP)
+- **F1 = 0.851** for failure prediction (LSTM with attention)
+- **RMSE = 17.82 cycles** for RUL estimation (XGBoost)
+- **C-Index = 0.951** for survival analysis (Bayesian Weibull)
+- **97.6% cost reduction** via optimized scheduling (MILP)
 
 Most importantly, the system bridges the critical gap between *failure prediction* and *actionable maintenance decisions*, providing operators with clear, prioritized recommendations under real-world resource constraints.
 
 ### 12.2 Future Work
 
-1. **Multi-subset evaluation** — Extend to C-MAPSS FD002–FD004 datasets with multiple operating conditions and fault modes
+1. **Cross-domain evaluation** — Extend validation to additional industrial datasets beyond C-MAPSS and IMS
 2. **Transfer learning** — Adapt models across different equipment types using domain adaptation techniques
 3. **Online learning** — Implement model updating as new sensor data arrives, adapting to concept drift
 4. **Real-time inference** — Deploy as a microservice with sub-second inference latency
 5. **Real-world validation** — Partner with manufacturing facilities for pilot deployment with actual maintenance data
 6. **Reinforcement learning** — Explore RL-based scheduling to learn optimal policies from historical maintenance outcomes
 
-> **Note:** IMS Bearing Dataset integration has been completed. Both notebooks (`Smart_Industrial_Maintenance_Repo_Pipeline.ipynb` and `Smart_Industrial_Maintenance_Standalone_Pipeline.ipynb`) train all 4 models on real vibration data from NASA IMS bearing experiments with full visualization and dashboard-aligned outputs.
+> **Note:** IMS Bearing Dataset integration has been completed. The notebook `Smart_Industrial_Maintenance_Repo_Pipeline.ipynb` trains all 4 models on real vibration data from NASA IMS bearing experiments with full visualization and dashboard-aligned outputs.
 
 ---
 
@@ -680,10 +674,10 @@ Most importantly, the system bridges the critical gap between *failure predictio
 
 | Model | Parameter | Value |
 |-------|-----------|-------|
-| LSTM Autoencoder | Hidden dim / Latent dim / Layers / Dropout | Auto-tuned / auto/2 / 2 / 0.2 |
-| LSTM Autoencoder | Learning rate / Epochs / Batch size | 1e-3 / 50 / auto-tuned |
-| LSTM Predictor | Hidden dim / Layers / Dropout | Auto-tuned / 2 / 0.3 |
-| LSTM Predictor | Learning rate / Epochs / Batch size / Horizon | 1e-3 / 50 / auto-tuned / 30 |
+| LSTM Autoencoder | Hidden dim / Latent dim / Layers / Dropout | 128 / 64 / 2 / 0.2 |
+| LSTM Autoencoder | Learning rate / Epochs / Batch size | 1e-3 / 100 / 64 |
+| LSTM Predictor | Hidden dim / Layers / Dropout | 256 / 3 / 0.4 |
+| LSTM Predictor | Learning rate / Epochs / Batch size / Horizon | 1e-3 / 50 / 32 / 30 |
 | XGBoost | n_estimators / max_depth / learning_rate | 200 / 6 / 0.1 |
 | XGBoost | subsample / colsample / L1 / L2 | 0.8 / 0.8 / 0.1 / 1.0 |
 | Bayesian Survival | Confidence levels | 90%, 95% |
@@ -691,27 +685,28 @@ Most importantly, the system bridges the critical gap between *failure predictio
 
 ### B. Data Split Summary
 
-| Split | Units | Rows | Sequences | Failure Rate |
-|-------|-------|------|-----------|--------------|
-| Train | 70 | 14,316 | 12,286 | 17.66% |
-| Validation | 15 | 3,170 | 2,735 | 17.00% |
-| Test | 15 | 3,145 | 2,710 | 17.16% |
+| Split | Units | Sequences | Failure Rate | Avg RUL |
+|-------|-------|-----------|--------------|---------|
+| Train | 708 | 138,803 | 15.81% | 84.89 |
+| Validation | 106 | 21,887 | 15.01% | 86.91 |
+| Test | 107 | 21,068 | 15.74% | 85.04 |
 
 ### C. Saved Model Artifacts
 
 | File | Size | Description |
 |------|------|-------------|
-| `autoencoder.pt` | 0.51 MB | LSTM Autoencoder weights + threshold |
-| `lstm_predictor.pt` | 0.24 MB | LSTM Predictor weights + attention parameters |
-| `xgboost_rul.pkl` | 0.91 MB | XGBoost model + feature importance |
+| `autoencoder.pt` | 1.9 MB | LSTM Autoencoder weights + threshold |
+| `lstm_predictor.pt` | 5.4 MB | LSTM Predictor weights + attention parameters |
+| `xgboost_rul.pkl` | 0.94 MB | XGBoost model + feature importance |
 | `bayesian_survival.pkl` | 2.02 MB | Weibull AFT model + KM fitter |
-| `preprocessor.pkl` | 0.00 MB | MinMaxScaler + feature column config |
+| `survival_model.pkl` | 15.0 MB | Full survival checkpoint with selected covariates |
+| `preprocessor.pkl` | 0.002 MB | MinMaxScaler + feature column config |
 
 ### D. Environment & Reproducibility
 
 ```
-Python 3.9+ | PyTorch 2.x | Random Seed: 42
-Platform: Windows | Tested on CPU and Google Colab GPU
+Python 3.13.7 | PyTorch 2.x | Random Seed: 42
+Platform: Linux | Tested on CPU and CUDA-capable GPU path
 All results are reproducible with: python scripts/train_all.py
 ```
 
@@ -721,7 +716,7 @@ All results are reproducible with: python scripts/train_all.py
 # Install dependencies
 pip install -r requirements.txt
 
-# Train all models (≈5 min on CPU)
+# Train all models (≈7-9 min on CPU for full FD001-FD004)
 python scripts/train_all.py
 
 # Run inference pipeline

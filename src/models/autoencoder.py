@@ -166,6 +166,7 @@ class AutoencoderTrainer:
         self.lr = lr or config.AE_LEARNING_RATE
         self.epochs = epochs or config.AE_EPOCHS
         self.batch_size = batch_size or config.AE_BATCH_SIZE
+        print(f"[DEBUG] Trainer initialized with epochs={self.epochs} (from config: {config.AE_EPOCHS})")
         self.optimizer = torch.optim.Adam(model.parameters(), lr=self.lr)
         self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             self.optimizer, patience=5, factor=0.5
@@ -188,6 +189,7 @@ class AutoencoderTrainer:
             TensorDataset(train_tensor, train_tensor),
             batch_size=self.batch_size, shuffle=True,
             num_workers=config.NUM_WORKERS, pin_memory=config.PIN_MEMORY,
+            persistent_workers=config.NUM_WORKERS > 0,
         )
 
         val_loader = None
@@ -197,14 +199,21 @@ class AutoencoderTrainer:
                 TensorDataset(val_tensor, val_tensor),
                 batch_size=self.batch_size, shuffle=False,
                 num_workers=config.NUM_WORKERS, pin_memory=config.PIN_MEMORY,
+                persistent_workers=config.NUM_WORKERS > 0,
             )
 
         best_val_loss = float("inf")
         best_state = None
 
+        # Automatic Mixed Precision — ~1.5-2x faster on CUDA, no-op on CPU
+        use_amp = torch.cuda.is_available() and str(config.DEVICE) != "cpu"
+        scaler = torch.amp.GradScaler('cuda', enabled=use_amp)
+
+        _orig_model = self.model
+
         print(f"\n[AUTOENCODER] Training on {config.DEVICE} "
               f"({len(X_train)} samples, {self.epochs} epochs, "
-              f"batch_size={self.batch_size})")
+              f"batch_size={self.batch_size}, AMP={use_amp})")
 
         n_batches = len(train_loader)
         epoch_bar = tqdm(range(self.epochs), desc="[AE] Epochs", unit="epoch")
@@ -214,13 +223,17 @@ class AutoencoderTrainer:
             train_loss = 0
             for batch_idx, (batch_x, _) in enumerate(train_loader, 1):
                 batch_x = batch_x.to(config.DEVICE, non_blocking=config.PIN_MEMORY)
-                reconstruction = self.model(batch_x)
-                loss = self.criterion(reconstruction, batch_x)
+
+                with torch.amp.autocast('cuda', enabled=use_amp):
+                    reconstruction = self.model(batch_x)
+                    loss = self.criterion(reconstruction, batch_x)
 
                 self.optimizer.zero_grad()
-                loss.backward()
+                scaler.scale(loss).backward()
+                scaler.unscale_(self.optimizer)
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
-                self.optimizer.step()
+                scaler.step(self.optimizer)
+                scaler.update()
                 train_loss += loss.item() * len(batch_x)
                 epoch_bar.set_postfix(batch=f"{batch_idx}/{n_batches}",
                                       loss=f"{loss.item():.6f}")
@@ -236,8 +249,9 @@ class AutoencoderTrainer:
                 with torch.no_grad():
                     for batch_x, _ in val_loader:
                         batch_x = batch_x.to(config.DEVICE, non_blocking=config.PIN_MEMORY)
-                        reconstruction = self.model(batch_x)
-                        loss = self.criterion(reconstruction, batch_x)
+                        with torch.amp.autocast('cuda', enabled=use_amp):
+                            reconstruction = self.model(batch_x)
+                            loss = self.criterion(reconstruction, batch_x)
                         val_loss += loss.item() * len(batch_x)
                 val_loss /= len(X_val)
                 self.val_history.append(val_loss)
@@ -245,7 +259,7 @@ class AutoencoderTrainer:
 
                 if val_loss < best_val_loss:
                     best_val_loss = val_loss
-                    best_state = {k: v.cpu().clone() for k, v in self.model.state_dict().items()}
+                    best_state = {k: v.cpu().clone() for k, v in _orig_model.state_dict().items()}
 
             # Update epoch progress bar
             postfix = {"train_loss": f"{train_loss:.6f}"}
@@ -253,11 +267,14 @@ class AutoencoderTrainer:
                 postfix["val_loss"] = f"{val_loss:.6f}"
             epoch_bar.set_postfix(postfix)
 
-        # Restore best model
+        # Restore best model into original (uncompiled) model
         if best_state is not None:
-            self.model.load_state_dict(best_state)
-            self.model.to(config.DEVICE)
+            _orig_model.load_state_dict(best_state)
+            _orig_model.to(config.DEVICE)
+            self.model = _orig_model
             print(f"[AUTOENCODER] Restored best model (val_loss={best_val_loss:.6f})")
+        else:
+            self.model = _orig_model
 
         # Set anomaly threshold from validation scores (not training scores).
         # Training reconstruction errors are lower/less variable because the

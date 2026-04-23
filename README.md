@@ -49,14 +49,16 @@ Streamlit Dashboard (7 pages)
 
 | Model | Metric | Value |
 |-------|--------|-------|
-| LSTM Failure Predictor | F1-Score | **0.933** |
-| LSTM Failure Predictor | AUC-ROC | **0.997** |
-| XGBoost RUL | RMSE | **10.48 cycles** |
-| XGBoost RUL | R² | **0.937** |
-| Bayesian Survival | C-Index | **0.992** |
-| MILP Optimization | Cost Reduction | **97.4%** vs reactive |
-| MILP Optimization | Downtime Reduction | **72.4%** vs reactive |
-| Monte Carlo Simulation | Failure Reduction | **99.0%** vs reactive |
+| LSTM Failure Predictor | F1-Score | **0.851** |
+| LSTM Failure Predictor | AUC-ROC | **0.983** |
+| XGBoost RUL | RMSE | **17.82 cycles** |
+| XGBoost RUL | R² | **0.813** |
+| Bayesian Survival | C-Index | **0.951** |
+| MILP Optimization | Cost Reduction | **97.6%** vs reactive |
+| MILP Optimization | Downtime Reduction | **72.5%** vs reactive |
+| Monte Carlo Simulation | Failure Reduction | **99.2%** vs reactive |
+
+Latest metrics source: `models/saved/dashboard_metrics.json` (timestamp: 2026-04-22T20:49:14).
 
 ---
 
@@ -188,9 +190,8 @@ jupyter notebook notebooks/Smart_Industrial_Maintenance_Repo_Pipeline.ipynb
 ```
 
 - `Smart_Industrial_Maintenance_Repo_Pipeline.ipynb` — uses local `src/` imports (requires this repo)
-- `Smart_Industrial_Maintenance_Standalone_Pipeline.ipynb` — fully self-contained, no local imports needed
 
-Both notebooks download the NASA IMS Bearing dataset (~2 GB) automatically via `kagglehub`. Kaggle credentials are required — place your `kaggle.json` in `~/.kaggle/`.
+The notebook downloads the NASA IMS Bearing dataset (~2 GB) automatically via `kagglehub`. Kaggle credentials are required — place your `kaggle.json` in `~/.kaggle/`.
 
 Alternatively, train via script:
 ```bash
@@ -271,8 +272,7 @@ Smart-Industrial-Maintenance-System/
 │   └── test_ims.py                  # 11 tests: IMS feature extraction + model compatibility
 │
 ├── notebooks/
-│   ├── Smart_Industrial_Maintenance_Repo_Pipeline.ipynb       # IMS pipeline (repo-integrated)
-│   └── Smart_Industrial_Maintenance_Standalone_Pipeline.ipynb # IMS pipeline (self-contained)
+│   └── Smart_Industrial_Maintenance_Repo_Pipeline.ipynb       # IMS pipeline (repo-integrated)
 │
 ├── Docs/                            # Project documentation and presentations
 │
@@ -294,7 +294,9 @@ Smart-Industrial-Maintenance-System/
 │   ├── ims_autoencoder.pt           # IMS LSTM Autoencoder
 │   ├── ims_predictor.pt             # IMS LSTM Predictor
 │   ├── ims_xgboost.pkl              # IMS XGBoost RUL
-│   └── ims_survival.pkl             # IMS Weibull Survival
+│   ├── ims_survival.pkl             # IMS Weibull Survival
+│   ├── dashboard_metrics.json       # Live dashboard metric source of truth
+│   └── simulation_metrics.json      # Monte Carlo policy metrics source of truth
 │
 └── assets/                          # Dashboard screenshots for documentation
 ```
@@ -363,7 +365,7 @@ All hyperparameters are centralized in `config.py`.
 | `TRAIN_RATIO` | 0.70 | Training set proportion |
 | `VAL_RATIO` | 0.15 | Validation set proportion |
 | `TEST_RATIO` | 0.15 | Test set proportion |
-| `AE_EPOCHS` | 50 | Autoencoder training epochs |
+| `AE_EPOCHS` | 100 | Autoencoder training epochs |
 | `PRED_EPOCHS` | 50 | LSTM Predictor training epochs |
 | `PRED_FAILURE_HORIZON` | 30 | Failure prediction horizon (cycles) |
 | `AE_ANOMALY_THRESHOLD_SIGMA` | 3.0 | Anomaly threshold: mean + N * sigma |
@@ -372,6 +374,15 @@ All hyperparameters are centralized in `config.py`.
 | `MAINTENANCE_COST_BASE` | 2000 | Base maintenance job cost (USD) |
 | `SAFETY_RISK_THRESHOLD` | 0.7 | Mandatory service risk threshold |
 | `SCHEDULING_HORIZON` | 10 | Number of scheduling time slots |
+
+---
+
+## Current Run Sanity Notes
+
+- Source of truth for dashboard and report metrics is `models/saved/dashboard_metrics.json` and `models/saved/simulation_metrics.json`.
+- Current `recommendations.csv` shows risk saturation (all 107 units are `Service Immediately`, with risk scores in [0.9967, 1.0]).
+- Of 107 units, 32 are scheduled and 75 remain unscheduled due to crew/horizon constraints (`MAX_CONCURRENT_CREWS=3`, `SCHEDULING_HORIZON=10`).
+- This behavior is useful for stress testing but should be treated as a calibration warning before production deployment.
 
 ---
 
@@ -397,24 +408,43 @@ pip install torch torchvision --index-url https://download.pytorch.org/whl/cu126
 
 ## Bring Your Own Data
 
-This system is designed as a reusable baseline for production industrial use.
+This system is designed as a reusable baseline. Any time-series sensor dataset that can be reshaped into per-unit cycles can be plugged into the same pipeline — the models, MILP, and dashboard do not assume turbofan-specific physics.
 
 ### Expected Input Format
 
-| Column | Type | Description |
-|--------|------|-------------|
-| `unit_id` | int | Machine/unit identifier |
-| `cycle` | int | Monotonically increasing time step per unit |
-| `sensor_1` ... `sensor_N` | float | Sensor readings |
-| `op_setting_1` ... `op_setting_3` | float | (Optional) Operating conditions |
+A long-format dataframe with one row per (machine, cycle) and one column per sensor:
 
-### Retrain Steps
+| Column | Type | Required | Description |
+|--------|------|----------|-------------|
+| `unit_id` | int | yes | Machine / unit identifier |
+| `cycle` | int | yes | Monotonically increasing time step per unit (1, 2, 3, …) |
+| `sensor_1` … `sensor_N` | float | yes | Numeric sensor readings (any number of sensors) |
+| `op_setting_1` … `op_setting_3` | float | optional | Operating conditions / regimes |
+| `RUL` | float | optional | Remaining useful life. If absent it is computed as `max_cycle_per_unit - cycle` |
 
-1. Update `config.py`: set `CMAPSS_COLUMNS`, `SENSORS_TO_DROP`, `ACTIVE_SENSORS` to match your data
-2. Place your data in `data/raw/` as space-separated text files (no header row)
-3. Run `make train` to retrain all models
-4. Run `make inference` to generate recommendations
-5. Run `make dashboard` to view results
+### Plug-in Steps (≈ 5 minutes of config work)
+
+1. **Place the data** in `data/raw/` as either:
+   - Space-separated `.txt` files (NASA C-MAPSS layout: `unit_id cycle op_setting_1..3 sensor_1..N`), or
+   - A custom CSV — point `src/data/download.load_cmapss_train` at it (or write a small loader that returns a long-format dataframe with the columns above).
+2. **Update [config.py](config.py)** to match your sensor inventory:
+   - `CMAPSS_COLUMNS` — full column list in file order
+   - `SENSORS_TO_DROP` — constant / near-constant sensors to discard
+   - `OP_SETTINGS_TO_DROP` — operating settings to discard
+   - `ACTIVE_SENSORS` — derived list of features actually fed to the models
+   - `SEQUENCE_LENGTH`, `MAX_RUL`, `PRED_FAILURE_HORIZON` — adjust to your asset's cycle scale
+3. **Tune the cost / capacity knobs** so MILP and Monte Carlo speak your business units:
+   - `DOWNTIME_COST_PER_HOUR`, `MAINTENANCE_COST_BASE`
+   - `MAX_CONCURRENT_CREWS`, `SCHEDULING_HORIZON`, `SAFETY_RISK_THRESHOLD`
+4. **Run the pipeline:**
+   ```bash
+   make train         # retrains all 4 models on your data + writes dashboard_metrics.json
+   make inference     # generates data/processed/recommendations.csv
+   make dashboard     # launches Streamlit on http://localhost:8501
+   ```
+5. **Validate** with `make test` — the suite is dataset-agnostic and exercises the full preprocessing → model → MILP path.
+
+The same flow runs end-to-end through [notebooks/Smart_Industrial_Maintenance_Repo_Pipeline.ipynb](notebooks/Smart_Industrial_Maintenance_Repo_Pipeline.ipynb), which imports from `src/` and `config.py`. Any change to `config.py` is picked up automatically the next time the notebook kernel is restarted, so the same notebook works as the demo / report artifact for any plugged-in dataset.
 
 ---
 

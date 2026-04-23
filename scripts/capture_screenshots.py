@@ -14,6 +14,7 @@ import sys
 import time
 import socket
 import subprocess
+import threading
 
 # Force UTF-8 for all subprocess communication on Windows (Streamlit uses → in output)
 os.environ.setdefault("PYTHONUTF8", "1")
@@ -98,35 +99,50 @@ def capture(verbose: bool = True) -> bool:
         time.sleep(3)  # Let the initial render settle
 
         # ── Playwright session ────────────────────────────────────────────────
-        with sync_playwright() as pw:
-            browser = pw.chromium.launch()
-            page = browser.new_page(viewport={"width": 1400, "height": 900})
+        # Run sync_playwright in a dedicated thread to avoid conflicts with
+        # asyncio event loops (e.g. when called from a Jupyter notebook).
+        _exc: list = []
 
-            page.goto(f"http://localhost:{PORT}", timeout=30_000)
-            page.wait_for_load_state("networkidle", timeout=30_000)
-            time.sleep(2)
+        def _playwright_thread():
+            try:
+                with sync_playwright() as pw:
+                    browser = pw.chromium.launch()
+                    page = browser.new_page(viewport={"width": 1400, "height": 900})
 
-            for label, filename in PAGES:
-                if verbose:
-                    print(f"[SCREENSHOTS] Capturing: {label} ...")
-                try:
-                    # Click the matching sidebar radio label
-                    sidebar = page.locator("[data-testid='stSidebar']")
-                    sidebar.get_by_text(label, exact=True).click()
-                    page.wait_for_load_state("networkidle", timeout=15_000)
-                    time.sleep(2)  # Wait for Plotly charts to finish rendering
+                    page.goto(f"http://localhost:{PORT}", timeout=30_000)
+                    page.wait_for_load_state("networkidle", timeout=30_000)
+                    time.sleep(2)
 
-                    out_path = os.path.join(ASSETS_DIR, filename)
-                    page.screenshot(path=out_path, full_page=False)
-                    if verbose:
-                        print(f"[SCREENSHOTS]   Saved → {filename}")
-                except PWTimeout:
-                    print(f"[SCREENSHOTS]   Timeout on '{label}' — skipping.")
-                except Exception as exc:
-                    safe_msg = str(exc).encode("ascii", errors="replace").decode("ascii")
-                    print(f"[SCREENSHOTS]   Error on '{label}': {safe_msg}")
+                    for label, filename in PAGES:
+                        if verbose:
+                            print(f"[SCREENSHOTS] Capturing: {label} ...")
+                        try:
+                            # Click the matching sidebar radio label
+                            sidebar = page.locator("[data-testid='stSidebar']")
+                            sidebar.get_by_text(label, exact=True).click()
+                            page.wait_for_load_state("networkidle", timeout=15_000)
+                            time.sleep(2)  # Wait for Plotly charts to finish rendering
 
-            browser.close()
+                            out_path = os.path.join(ASSETS_DIR, filename)
+                            page.screenshot(path=out_path, full_page=False)
+                            if verbose:
+                                print(f"[SCREENSHOTS]   Saved → {filename}")
+                        except PWTimeout:
+                            print(f"[SCREENSHOTS]   Timeout on '{label}' — skipping.")
+                        except Exception as exc:
+                            safe_msg = str(exc).encode("ascii", errors="replace").decode("ascii")
+                            print(f"[SCREENSHOTS]   Error on '{label}': {safe_msg}")
+
+                    browser.close()
+            except Exception as exc:
+                _exc.append(exc)
+
+        t = threading.Thread(target=_playwright_thread, daemon=True)
+        t.start()
+        t.join()
+
+        if _exc:
+            raise _exc[0]
 
         if verbose:
             print(f"[SCREENSHOTS] Done. Screenshots saved to {ASSETS_DIR}/")
