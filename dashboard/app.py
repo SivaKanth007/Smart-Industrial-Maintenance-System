@@ -177,14 +177,13 @@ def load_metrics():
 @st.cache_resource
 def load_xgboost_model():
     """Load XGBoost model for feature importance display."""
-    for name in ["xgboost_rul.pkl", "xgboost_model.pkl"]:
-        path = os.path.join(config.MODELS_DIR, name)
-        if os.path.exists(path):
-            try:
-                with open(path, "rb") as f:
-                    return pickle.load(f)
-            except Exception:
-                pass
+    path = os.path.join(config.MODELS_DIR, "xgboost_rul.pkl")
+    if os.path.exists(path):
+        try:
+            with open(path, "rb") as f:
+                return pickle.load(f)
+        except Exception:
+            pass
     return None
 
 
@@ -739,7 +738,7 @@ def render_model_performance(data):
         ("Cost Reduction", f"{sim.get('cost_reduction_pct', 0):.1f}%", "#44BB44"),
         ("Downtime Reduction", f"{sim.get('downtime_reduction_pct', 0):.1f}%", "#44BB44"),
         ("Failure Reduction", f"{sim.get('failure_reduction_pct', 0):.1f}%", "#44BB44"),
-        ("Availability Gain", f"+{sim.get('availability_gain_pp', 0):.0f} pp", "#44BB44"),
+        ("Availability Gain", f"+{sim.get('availability_gain_pp', 0):.1f} pp", "#44BB44"),
     ]
     for col, (label, val, color) in zip([bi_col1, bi_col2, bi_col3, bi_col4], impact):
         with col:

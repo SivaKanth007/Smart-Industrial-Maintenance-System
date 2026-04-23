@@ -131,7 +131,13 @@ class MaintenanceSimulator:
     def run_optimized(self, health, risk_threshold=0.4):
         """
         Optimized policy: risk-based predictive maintenance.
-        Maintenance triggered when health drops below threshold.
+        Maintenance is triggered when the simulated health score falls below
+        ``risk_threshold``. The simulation uses the simulator's true health
+        trajectory as a stand-in for the predictor's risk estimate, so this
+        policy represents the upper bound of cost / downtime savings that a
+        well-calibrated risk-based scheduler can achieve. Replacing the
+        oracle health signal with noisy predictor outputs would give the
+        realised performance of the trained model.
         """
         total_cost = 0
         total_downtime = 0

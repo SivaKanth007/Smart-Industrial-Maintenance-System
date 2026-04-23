@@ -103,14 +103,19 @@ def run_pipeline(test_mode=False):
     # =========================================================================
     print("\n[PIPELINE] Stage 3: Per-Unit Risk Aggregation")
 
-    # For each unique unit, take the latest (most recent) prediction
+    # For each unique unit, average the predictor's output over the last K
+    # sequences. Taking the single most-recent prediction collapses every
+    # end-of-life test unit to risk ≈ 1.0, which then makes the MILP unable
+    # to differentiate priorities. The smoothed score preserves ordering
+    # while remaining responsive to recent degradation.
+    last_k = max(1, int(config.RISK_AGGREGATION_LAST_K))
     unit_risks = {}
     for uid in np.unique(unit_ids):
-        mask = unit_ids == uid
-        latest_idx = np.where(mask)[0][-1]  # Last sequence for this unit
-        unit_risks[int(uid)] = float(failure_proba[latest_idx])
+        idx = np.where(unit_ids == uid)[0][-last_k:]
+        unit_risks[int(uid)] = float(failure_proba[idx].mean())
 
-    print(f"  Units assessed: {len(unit_risks)}")
+    print(f"  Units assessed: {len(unit_risks)} (risk averaged over last "
+          f"{last_k} sequences per unit)")
 
     # =========================================================================
     # Stage 4: MILP Optimization

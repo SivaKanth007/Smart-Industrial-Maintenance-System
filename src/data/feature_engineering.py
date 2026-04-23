@@ -217,20 +217,6 @@ class FeatureEngineer:
         print(f"[FEATURES] Added {new_count} interaction features from top-{top_n} sensors")
         return df
 
-    def add_cycle_features(self, df):
-        """
-        DEPRECATED — do not call this method.
-
-        cycle_norm = cycle / max_cycle encodes the unit's failure cycle (future
-        information) as a feature, causing target leakage. This method is
-        retained for reference only and raises an error if called.
-        """
-        raise RuntimeError(
-            "add_cycle_features() is disabled: cycle_norm and cycle_squared encode "
-            "the unit's failure cycle (future information) and cause target leakage. "
-            "Remove this call from your pipeline."
-        )
-
     def engineer_features(self, df, fit=True):
         """
         Run the complete feature engineering pipeline.
@@ -239,7 +225,8 @@ class FeatureEngineer:
         ----------
         df : pd.DataFrame
         fit : bool
-            If True, fit regime model. If False, use previously fitted model.
+            If True, fit the operating-regime model. If False, apply the
+            previously fitted model.
 
         Returns
         -------
@@ -251,8 +238,9 @@ class FeatureEngineer:
 
         initial_cols = len(df.columns)
 
-        # NOTE: add_cycle_features() is intentionally excluded — cycle_norm
-        # encodes the failure cycle (future information) and causes target leakage.
+        # Cycle-derived features (cycle_norm, cycle_squared) are intentionally
+        # excluded: cycle_norm = cycle / max_cycle leaks the unit's failure
+        # cycle into the feature set.
         df = self.add_rolling_statistics(df)
         df = self.add_trend_features(df)
         df = self.add_operating_regimes(df, fit=fit)

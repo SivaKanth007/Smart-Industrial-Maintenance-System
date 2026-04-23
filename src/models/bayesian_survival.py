@@ -220,15 +220,25 @@ class BayesianSurvival:
         df_surv = self._apply_feature_selection(df)
         df_pred = df_surv.drop(columns=["duration", "event"], errors="ignore")
 
-        result = {"median": self.model.predict_median(df_pred).values.flatten()}
+        # Weibull AFT can extrapolate to astronomically large median lifetimes
+        # for rows whose covariates fall outside the training envelope. Clip to
+        # a configurable horizon so downstream consumers (dashboards, schedulers)
+        # see human-readable cycle counts rather than raw 1e15 extrapolations.
+        cap = config.SURVIVAL_MAX_PREDICTION
+
+        def _clip(arr):
+            return np.clip(np.nan_to_num(arr, nan=cap, posinf=cap, neginf=1.0),
+                           1.0, cap)
+
+        result = {"median": _clip(self.model.predict_median(df_pred).values.flatten())}
 
         for level in self.confidence_levels:
             alpha = 1 - level
             lower = self.model.predict_percentile(df_pred, p=alpha/2).values.flatten()
             upper = self.model.predict_percentile(df_pred, p=1-alpha/2).values.flatten()
             pct = int(level * 100)
-            result[f"lower_{pct}"] = lower
-            result[f"upper_{pct}"] = upper
+            result[f"lower_{pct}"] = _clip(lower)
+            result[f"upper_{pct}"] = _clip(upper)
 
         return result
 
@@ -247,16 +257,34 @@ class BayesianSurvival:
         actual_duration = df_surv["duration"].values
         events = df_surv["event"].values
 
-        # Concordance index (C-index)
+        # Weibull AFT can extrapolate to near-infinite medians for rows whose
+        # covariates lie outside the training envelope. Clip to a sane ceiling
+        # so a handful of outliers don't dominate the RMSE statistic.
+        median_pred = np.clip(median_pred, 1.0, config.SURVIVAL_MAX_PREDICTION)
+        finite_mask = np.isfinite(median_pred)
+
+        # Concordance index over all (unit, cycle) observations. The C-MAPSS
+        # data records run-to-failure trajectories, so per-row evaluation gives
+        # a stable signal of how well predicted time-to-failure orders the
+        # observed remaining durations.
         try:
-            c_index = concordance_index(actual_duration, median_pred, events)
-        except Exception:
+            c_index = concordance_index(
+                actual_duration[finite_mask],
+                median_pred[finite_mask],
+                events[finite_mask],
+            )
+        except ZeroDivisionError:
+            # No admissible pairs (e.g. all durations equal); fall back to
+            # the uninformative midpoint so downstream code keeps a finite
+            # value to display.
             c_index = 0.5
 
-        # RMSE on observed failures
-        mask = events == 1
+        # RMSE on observed failures only, restricted to finite predictions.
+        mask = (events == 1) & finite_mask
         if mask.sum() > 0:
-            rmse_failures = np.sqrt(np.mean((actual_duration[mask] - median_pred[mask]) ** 2))
+            rmse_failures = float(np.sqrt(
+                np.mean((actual_duration[mask] - median_pred[mask]) ** 2)
+            ))
         else:
             rmse_failures = float("nan")
 

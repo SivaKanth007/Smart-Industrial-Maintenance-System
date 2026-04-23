@@ -170,10 +170,7 @@ def _collect_xgboost_metrics() -> dict:
 
     xgb_path = os.path.join(config.MODELS_DIR, "xgboost_rul.pkl")
     if not os.path.exists(xgb_path):
-        # Try alternate name
-        xgb_path = os.path.join(config.MODELS_DIR, "xgboost_model.pkl")
-        if not os.path.exists(xgb_path):
-            return {}
+        return {}
 
     state = joblib.load(xgb_path)
     model = state.get("model")

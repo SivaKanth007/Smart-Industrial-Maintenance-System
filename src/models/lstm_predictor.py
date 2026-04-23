@@ -8,12 +8,39 @@ import os
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
 from sklearn.metrics import f1_score, precision_score, recall_score, roc_auc_score, precision_recall_curve
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 
 import config
+
+
+class FocalLoss(nn.Module):
+    """
+    Focal loss for binary classification (Lin et al., 2017).
+
+    L = - alpha * (1 - p_t)^gamma * log(p_t)
+
+    Down-weights well-classified examples so training focuses on the
+    hard, misclassified ones. Particularly effective on imbalanced
+    failure-prediction data, where standard BCE with class weighting
+    can over-correct toward recall and trade away precision.
+    """
+
+    def __init__(self, alpha=0.75, gamma=2.0):
+        super().__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+
+    def forward(self, logits, targets):
+        bce = F.binary_cross_entropy_with_logits(logits, targets, reduction="none")
+        p = torch.sigmoid(logits)
+        p_t = p * targets + (1 - p) * (1 - targets)
+        alpha_t = self.alpha * targets + (1 - self.alpha) * (1 - targets)
+        loss = alpha_t * (1 - p_t).pow(self.gamma) * bce
+        return loss.mean()
 
 
 class LSTMPredictor(nn.Module):
@@ -136,13 +163,22 @@ class PredictorTrainer:
             print(f"[PREDICTOR] WARNING: Only {int(pos_count)} positive samples — "
                   "model may not generalize well.")
 
-        # Dynamic pos_weight based on actual class balance (capped at 20.0)
-        if pos_count > 0:
-            computed_weight = min(neg_count / pos_count, 20.0)
+        # Loss function: focal loss (default) tends to give a better
+        # precision/recall trade-off on imbalanced failure data than BCE
+        # with positive class weighting.
+        if config.PRED_LOSS == "focal":
+            criterion = FocalLoss(
+                alpha=config.PRED_FOCAL_ALPHA,
+                gamma=config.PRED_FOCAL_GAMMA,
+            )
+            pos_weight = torch.tensor([1.0]).to(config.DEVICE)  # for logging only
         else:
-            computed_weight = 20.0
-        pos_weight = torch.tensor([computed_weight]).to(config.DEVICE)
-        criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+            if pos_count > 0:
+                computed_weight = min(neg_count / pos_count, 20.0)
+            else:
+                computed_weight = 20.0
+            pos_weight = torch.tensor([computed_weight]).to(config.DEVICE)
+            criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
 
         train_tensor_x = torch.FloatTensor(X_train)
         train_tensor_y = torch.FloatTensor(y_train)
@@ -175,7 +211,11 @@ class PredictorTrainer:
         print(f"\n[PREDICTOR] Training on {config.DEVICE} "
               f"({len(X_train)} samples, pos_rate={pos_count/len(y_train):.2%}, "
               f"batch_size={self.batch_size}, AMP={use_amp})")
-        print(f"[PREDICTOR] Positive weight: {pos_weight.item():.2f}")
+        if config.PRED_LOSS == "focal":
+            print(f"[PREDICTOR] Loss: focal (alpha={config.PRED_FOCAL_ALPHA}, "
+                  f"gamma={config.PRED_FOCAL_GAMMA})")
+        else:
+            print(f"[PREDICTOR] Loss: BCE (pos_weight={pos_weight.item():.2f})")
 
         n_batches = len(train_loader)
         epoch_bar = tqdm(range(self.epochs), desc="[PRED] Epochs", unit="epoch")
@@ -269,12 +309,13 @@ class PredictorTrainer:
         if len(np.unique(y_true)) > 1:
             auc = roc_auc_score(y_true, y_proba)
             precisions, recalls, thresholds = precision_recall_curve(y_true, y_proba)
-            f1_scores = np.where(
-                (precisions + recalls) > 0,
-                2 * precisions * recalls / (precisions + recalls),
-                0.0,
-            )
-            best_idx = np.argmax(f1_scores[:-1])
+            denom = precisions + recalls
+            f1_scores = np.zeros_like(denom)
+            np.divide(2 * precisions * recalls, denom,
+                      out=f1_scores, where=denom > 0)
+            # f1_scores has one more element than thresholds (the all-positive
+            # / all-negative endpoints); restrict argmax to the matching range.
+            best_idx = int(np.argmax(f1_scores[:-1]))
             optimal_threshold = float(thresholds[best_idx])
         else:
             auc = 0.0

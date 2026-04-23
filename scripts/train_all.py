@@ -137,7 +137,12 @@ def main():
     X_val_ae = X_val[y_val_rul > config.MAX_RUL * 0.5] if len(X_val) > 0 else None
 
     print(f"[TRAIN] Training autoencoder on {len(X_healthy)} healthy samples")
-    ae_trainer.train(X_healthy, X_val_ae)
+    ae_trainer.train(
+        X_healthy,
+        X_val=X_val_ae,
+        X_val_threshold=X_val,
+        y_val_threshold=y_val_rul,
+    )
     ae_trainer.save_model()
 
     # Compute anomaly scores on full data

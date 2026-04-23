@@ -142,6 +142,42 @@ class LSTMAutoencoder(nn.Module):
               f"(mean={np.mean(train_scores):.6f}, std={np.std(train_scores):.6f})")
         return self.threshold
 
+    def set_threshold_f1_optimal(self, scores, labels):
+        """
+        Pick the threshold that maximises F1 against true near-failure labels
+        on the validation set. Falls back to mean+sigma if labels carry only
+        one class (no positive examples to optimise against).
+        """
+        labels = np.asarray(labels).astype(int)
+        scores = np.asarray(scores).astype(float)
+        if len(np.unique(labels)) < 2:
+            print("[AUTOENCODER] WARNING: F1-optimal threshold requires both classes; "
+                  "falling back to mean+sigma rule.")
+            return self.set_threshold(scores)
+
+        # Sweep candidate thresholds along the score distribution.
+        candidates = np.unique(np.quantile(scores, np.linspace(0.01, 0.99, 99)))
+        best_f1, best_thr = -1.0, float(np.median(scores))
+        for thr in candidates:
+            preds = (scores > thr).astype(int)
+            tp = int(((preds == 1) & (labels == 1)).sum())
+            fp = int(((preds == 1) & (labels == 0)).sum())
+            fn = int(((preds == 0) & (labels == 1)).sum())
+            if tp + fp == 0 or tp + fn == 0:
+                continue
+            precision = tp / (tp + fp)
+            recall = tp / (tp + fn)
+            if precision + recall == 0:
+                continue
+            f1 = 2 * precision * recall / (precision + recall)
+            if f1 > best_f1:
+                best_f1, best_thr = f1, float(thr)
+
+        self.threshold = best_thr
+        print(f"[AUTOENCODER] Threshold (F1-optimal): {self.threshold:.6f}  "
+              f"(val F1={best_f1:.4f}, positive rate={labels.mean():.2%})")
+        return self.threshold
+
     def detect_anomalies(self, x):
         """
         Detect anomalies in input sequences.
@@ -166,7 +202,6 @@ class AutoencoderTrainer:
         self.lr = lr or config.AE_LEARNING_RATE
         self.epochs = epochs or config.AE_EPOCHS
         self.batch_size = batch_size or config.AE_BATCH_SIZE
-        print(f"[DEBUG] Trainer initialized with epochs={self.epochs} (from config: {config.AE_EPOCHS})")
         self.optimizer = torch.optim.Adam(model.parameters(), lr=self.lr)
         self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             self.optimizer, patience=5, factor=0.5
@@ -175,14 +210,25 @@ class AutoencoderTrainer:
         self.train_history = []
         self.val_history = []
 
-    def train(self, X_train, X_val=None):
+    def train(self, X_train, X_val=None,
+              X_val_threshold=None, y_val_threshold=None):
         """
         Train the autoencoder.
 
         Parameters
         ----------
         X_train : np.ndarray, shape (N, seq_len, n_features)
+            Healthy sequences used to fit the reconstruction model.
         X_val : np.ndarray, optional
+            Held-out healthy sequences used to track validation
+            reconstruction loss and drive early-stopping / LR scheduling.
+        X_val_threshold : np.ndarray, optional
+            Mixed validation set (healthy + degraded) used to calibrate the
+            anomaly-score threshold. Must contain both classes for
+            ``config.AE_THRESHOLD_STRATEGY == "f1_optimal"`` to be applied.
+        y_val_threshold : np.ndarray, optional
+            RUL targets aligned with ``X_val_threshold``. The near-failure
+            label is derived as ``y <= config.PRED_FAILURE_HORIZON``.
         """
         train_tensor = torch.FloatTensor(X_train)
         train_loader = DataLoader(
@@ -281,17 +327,48 @@ class AutoencoderTrainer:
         # model has partially memorized X_train — val scores better represent
         # the threshold that will generalize to unseen machines.
         self.model.eval()
-        if X_val is not None:
-            threshold_data = torch.FloatTensor(X_val)
-            threshold_source = "val"
+
+        # Resolve which validation set to use for threshold calibration.
+        # The mixed (healthy + degraded) set is preferred so that an
+        # F1-optimal sweep can actually see both classes; fall back to
+        # the healthy-only X_val (or X_train as a last resort) only when
+        # nothing better was supplied.
+        if X_val_threshold is not None:
+            threshold_X = X_val_threshold
+            threshold_y = y_val_threshold
+            threshold_source = "val_threshold (mixed)"
+        elif X_val is not None:
+            threshold_X = X_val
+            threshold_y = None
+            threshold_source = "val (healthy-only)"
         else:
-            threshold_data = torch.FloatTensor(X_train)
+            threshold_X = X_train
+            threshold_y = None
             threshold_source = "train (no val provided)"
             print("[AUTOENCODER] WARNING: No X_val provided — threshold set from training "
                   "data. This may not generalize to unseen machines.")
-        threshold_scores = self.model.compute_anomaly_score(threshold_data)
-        self.model.set_threshold(threshold_scores)
-        print(f"[AUTOENCODER] Threshold derived from: {threshold_source}")
+
+        threshold_scores = self.model.compute_anomaly_score(
+            torch.FloatTensor(threshold_X)
+        )
+
+        use_f1 = (
+            config.AE_THRESHOLD_STRATEGY == "f1_optimal"
+            and threshold_y is not None
+            and len(threshold_y) == len(threshold_X)
+        )
+        if use_f1:
+            val_labels = (np.asarray(threshold_y) <= config.PRED_FAILURE_HORIZON).astype(int)
+            if len(np.unique(val_labels)) < 2:
+                print("[AUTOENCODER] Threshold set: F1-optimal requires both classes in "
+                      "the validation set; falling back to mean+sigma.")
+                self.model.set_threshold(threshold_scores)
+            else:
+                self.model.set_threshold_f1_optimal(threshold_scores, val_labels)
+        else:
+            self.model.set_threshold(threshold_scores)
+        print(f"[AUTOENCODER] Threshold derived from: {threshold_source} "
+              f"(strategy={config.AE_THRESHOLD_STRATEGY})")
 
         return self.model
 
