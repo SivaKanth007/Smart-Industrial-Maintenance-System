@@ -169,11 +169,16 @@ SURVIVAL_MAX_PREDICTION = MAX_RUL * 5    # clip predict_median outputs to this
 # =============================================================================
 # MILP Optimization
 # =============================================================================
-MAX_CONCURRENT_CREWS = 3            # Max simultaneous maintenance jobs
+# Defaults sized for the C-MAPSS demo fleet (~107 test engines). Total
+# capacity = MAX_CONCURRENT_CREWS * SCHEDULING_HORIZON = 12 * 20 = 240 slots,
+# which comfortably absorbs the predictor's critical backlog. The dashboard's
+# Interactive Optimizer page lets the user override these per scenario without
+# editing this file.
+MAX_CONCURRENT_CREWS = 12           # Max simultaneous maintenance jobs per slot
 DOWNTIME_COST_PER_HOUR = 10000      # $ per hour of unplanned downtime
-MAINTENANCE_COST_BASE = 2000        # $ base maintenance cost
+MAINTENANCE_COST_BASE = 2000        # $ base maintenance cost (per service event)
 SAFETY_RISK_THRESHOLD = 0.7         # Risk above this = mandatory service
-SCHEDULING_HORIZON = 10             # Time slots to schedule over
+SCHEDULING_HORIZON = 20             # Time slots in the planning window
 
 # =============================================================================
 # Risk Categories

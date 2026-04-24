@@ -1130,6 +1130,338 @@ def render_operational_context(data):
 
 
 # ============================================================================
+# Interactive MILP Optimizer (what-if scenarios + rule-based advisor)
+# ============================================================================
+def _build_advisor_messages(result, n_crews, n_slots, downtime_cost,
+                             maintenance_cost, sweep_df=None):
+    """Turn scheduler output + a capacity sweep into natural-language advice.
+
+    Pure rules engine — no LLM required. Reads the scheduler's own warnings,
+    computes the cost-vs-capacity trade-off, and produces a short list of
+    actionable, numerically-grounded statements that read like an AI assistant.
+    """
+    summary = result.get("summary", {})
+    msgs = []
+
+    n_total = summary.get("total_machines", 0)
+    n_sched = summary.get("scheduled", 0)
+    n_def = summary.get("not_scheduled", 0)
+    n_crit = summary.get("critical", 0)
+    n_crit_def = summary.get("critical_unscheduled", 0)
+    cost_total = float(result.get("total_cost", 0.0))
+    cost_sched = float(summary.get("cost_scheduled", 0.0))
+    cost_unsched = float(summary.get("cost_unscheduled", 0.0))
+    capacity = n_crews * n_slots
+
+    # Headline assessment.
+    if n_total == 0:
+        msgs.append(("info",
+                     "No machines were submitted. Load a risk source on the left "
+                     "to begin a what-if analysis."))
+        return msgs
+
+    util_pct = 100.0 * n_sched / max(capacity, 1)
+    if n_crit_def == 0 and n_def == 0:
+        msgs.append(("success",
+                     f"All {n_total} machines fit inside your {capacity}-slot "
+                     f"capacity envelope. Capacity utilisation: {util_pct:.0f}%."))
+    elif n_crit_def == 0:
+        msgs.append(("success",
+                     f"All {n_crit} critical machines are scheduled. "
+                     f"{n_def} lower-risk machines were intentionally deferred "
+                     f"because monitoring them is cheaper than servicing — that "
+                     f"is the optimizer doing its job, not a capacity problem."))
+    else:
+        msgs.append(("error",
+                     f"{n_crit_def} of {n_crit} critical machines could not be "
+                     f"serviced inside the current {capacity}-slot window. The "
+                     f"highest-risk units were prioritised; the rest carry "
+                     f"residual exposure."))
+
+    # Cost decomposition.
+    if cost_total > 0:
+        share_unsched = 100.0 * cost_unsched / cost_total
+        msgs.append(("info",
+                     f"Cost mix: ${cost_sched:,.0f} planned maintenance + "
+                     f"${cost_unsched:,.0f} expected downtime ({share_unsched:.0f}% "
+                     f"of total realised cost is from deferred risk)."))
+
+    # Cost-vs-capacity trade-off (sweep-driven recommendation).
+    if sweep_df is not None and len(sweep_df) > 0:
+        best_row = sweep_df.loc[sweep_df["total_cost"].idxmin()]
+        best_crews = int(best_row["n_crews"])
+        best_cost = float(best_row["total_cost"])
+        if best_crews != n_crews and best_cost < cost_total:
+            crew_added = best_crews - n_crews
+            saving = cost_total - best_cost
+            verb = "increasing" if crew_added > 0 else "reducing"
+            msgs.append(("warning",
+                         f"Sweep analysis: {verb} crew count from {n_crews} to "
+                         f"{best_crews} ({crew_added:+d}) lowers total realised "
+                         f"cost from ${cost_total:,.0f} to ${best_cost:,.0f} — "
+                         f"net saving ${saving:,.0f} per planning cycle."))
+        else:
+            msgs.append(("success",
+                         f"Sweep analysis: your current crew count ({n_crews}) "
+                         f"is already on the cost-optimal Pareto point across "
+                         f"the swept range."))
+
+    # Surface the scheduler's own recommendations verbatim (they include the
+    # exact crews/slots needed to clear all criticals).
+    for rec in result.get("recommendations", []):
+        msgs.append(("info", f"📋 {rec}"))
+
+    # Breakeven hint — explains *why* certain low-risk machines were deferred.
+    breakeven_risk = maintenance_cost / max(downtime_cost * 8.0, 1.0)
+    msgs.append(("info",
+                 f"Decision rule: any machine with failure risk above "
+                 f"{breakeven_risk:.1%} is cheaper to service than to leave alone. "
+                 f"Machines below that threshold are deliberately skipped unless "
+                 f"capacity is free."))
+
+    return msgs
+
+
+def _run_capacity_sweep(machine_risks, machine_names, n_slots, downtime_cost,
+                        maintenance_cost, safety_threshold, base_crews):
+    """Re-solve the MILP at several crew counts to expose the trade-off curve."""
+    from src.optimization.milp_scheduler import MaintenanceScheduler
+
+    crew_grid = sorted({max(1, base_crews // 2), max(1, base_crews - 2),
+                        base_crews, base_crews + 2, base_crews + 5,
+                        base_crews + 10})
+    rows = []
+    for c in crew_grid:
+        sched = MaintenanceScheduler(
+            n_crews=c, downtime_cost=downtime_cost,
+            maintenance_cost=maintenance_cost,
+            safety_threshold=safety_threshold)
+        r = sched.create_schedule(
+            machine_risks=machine_risks, n_time_slots=n_slots,
+            machine_names=machine_names)
+        s = r.get("summary", {})
+        rows.append({
+            "n_crews": c,
+            "capacity": c * n_slots,
+            "scheduled": s.get("scheduled", 0),
+            "critical_unscheduled": s.get("critical_unscheduled", 0),
+            "total_cost": float(r.get("total_cost", 0.0)),
+            "status": r.get("status", "?"),
+        })
+    return pd.DataFrame(rows)
+
+
+def render_interactive_optimizer(data):
+    """Interactive what-if MILP page with rule-based AI advisor."""
+    from src.optimization.milp_scheduler import MaintenanceScheduler
+
+    st.title("🛠️ Interactive Maintenance Optimizer")
+    st.caption(
+        "Run what-if scenarios against the MILP scheduler. Adjust crew counts, "
+        "horizon, and cost parameters; the advisor explains the trade-offs.")
+
+    # ---- Sidebar: scenario controls ---------------------------------------
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("Optimizer Scenario")
+
+    risk_source = st.sidebar.radio(
+        "Risk source",
+        ["Latest pipeline run", "Synthetic (Beta distribution)", "Upload CSV"],
+        help="Where the per-machine failure probabilities come from.")
+
+    machine_risks = {}
+    machine_names = {}
+
+    if risk_source == "Latest pipeline run":
+        rec_df = data.get("recommendations")
+        if rec_df is None or len(rec_df) == 0:
+            st.warning(
+                "No `recommendations.csv` found yet. Run the notebook (or "
+                "`scripts/run_pipeline.py`) once to populate it, or pick "
+                "another risk source.")
+            return
+        for i, row in rec_df.iterrows():
+            machine_risks[i + 1] = float(row["risk_score"])
+            machine_names[i + 1] = str(row["machine"])
+    elif risk_source == "Synthetic (Beta distribution)":
+        n_mach = st.sidebar.slider("Number of machines", 5, 500, 50, 5)
+        alpha = st.sidebar.slider("Beta α (lower = healthier fleet)",
+                                   0.5, 8.0, 2.0, 0.5)
+        beta = st.sidebar.slider("Beta β (higher = healthier fleet)",
+                                  0.5, 8.0, 5.0, 0.5)
+        seed = st.sidebar.number_input("Random seed", value=42, step=1)
+        rng = np.random.default_rng(int(seed))
+        risks_arr = np.clip(rng.beta(alpha, beta, size=n_mach), 0.0, 1.0)
+        for i, r in enumerate(risks_arr, start=1):
+            machine_risks[i] = float(r)
+            machine_names[i] = f"Synth-{i:03d}"
+    else:  # Upload CSV
+        uploaded = st.sidebar.file_uploader(
+            "CSV with columns: machine_id, risk (and optional name)",
+            type=["csv"])
+        if uploaded is None:
+            st.info(
+                "Upload a CSV with at minimum `machine_id` and `risk` columns "
+                "(risk in [0, 1]). An optional `name` column overrides the "
+                "default display name.")
+            return
+        df_up = pd.read_csv(uploaded)
+        if "machine_id" not in df_up.columns or "risk" not in df_up.columns:
+            st.error("CSV must contain `machine_id` and `risk` columns.")
+            return
+        for _, row in df_up.iterrows():
+            mid = int(row["machine_id"])
+            machine_risks[mid] = float(row["risk"])
+            machine_names[mid] = (str(row["name"])
+                                   if "name" in df_up.columns
+                                   else f"Machine-{mid}")
+
+    n_machines = len(machine_risks)
+
+    # Resource & cost knobs.
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("Resources")
+    n_crews = st.sidebar.slider(
+        "Crews per slot", 1, 50, int(config.MAX_CONCURRENT_CREWS), 1)
+    n_slots = st.sidebar.slider(
+        "Scheduling horizon (slots)", 1, 60, int(config.SCHEDULING_HORIZON), 1)
+
+    st.sidebar.subheader("Costs (USD)")
+    downtime_cost = st.sidebar.number_input(
+        "Downtime cost per hour", min_value=100, max_value=200_000,
+        value=int(config.DOWNTIME_COST_PER_HOUR), step=500)
+    maintenance_cost = st.sidebar.number_input(
+        "Maintenance cost per event", min_value=100, max_value=100_000,
+        value=int(config.MAINTENANCE_COST_BASE), step=100)
+    safety_threshold = st.sidebar.slider(
+        "Safety risk threshold", 0.0, 1.0,
+        float(config.SAFETY_RISK_THRESHOLD), 0.05)
+
+    run_sweep = st.sidebar.checkbox(
+        "Run capacity sweep (slower, enables advisor recommendation)",
+        value=True)
+
+    if not st.sidebar.button("▶️ Optimize", type="primary",
+                              use_container_width=True):
+        st.info(
+            f"Loaded **{n_machines}** machines. Adjust the sliders on the left "
+            f"and click **Optimize** to solve the MILP for this scenario.")
+        return
+
+    # ---- Solve --------------------------------------------------------------
+    with st.spinner("Solving MILP..."):
+        scheduler = MaintenanceScheduler(
+            n_crews=n_crews, downtime_cost=downtime_cost,
+            maintenance_cost=maintenance_cost,
+            safety_threshold=safety_threshold)
+        result = scheduler.create_schedule(
+            machine_risks=machine_risks, n_time_slots=n_slots,
+            machine_names=machine_names)
+
+    sweep_df = None
+    if run_sweep:
+        with st.spinner("Running capacity sweep..."):
+            sweep_df = _run_capacity_sweep(
+                machine_risks, machine_names, n_slots, downtime_cost,
+                maintenance_cost, safety_threshold, n_crews)
+
+    summary = result["summary"]
+    schedule_df = result["schedule"]
+
+    # ---- KPI strip ---------------------------------------------------------
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Machines", n_machines)
+    c2.metric("Scheduled", f"{summary['scheduled']} / {n_machines}")
+    c3.metric("Critical deferred", summary["critical_unscheduled"])
+    c4.metric("Total cost", f"${result['total_cost']:,.0f}")
+    status_label = result["status"]
+    status_color = ("🟢" if status_label == "Optimal"
+                    else "🟡" if status_label == "Best-Effort"
+                    else "🟠")
+    c5.metric("Status", f"{status_color} {status_label}")
+
+    # ---- AI Advisor --------------------------------------------------------
+    st.subheader("🤖 AI Advisor")
+    advisor_msgs = _build_advisor_messages(
+        result, n_crews, n_slots, downtime_cost, maintenance_cost, sweep_df)
+    for level, msg in advisor_msgs:
+        if level == "success":
+            st.success(msg)
+        elif level == "warning":
+            st.warning(msg)
+        elif level == "error":
+            st.error(msg)
+        else:
+            st.info(msg)
+
+    # ---- Schedule visualisation -------------------------------------------
+    tab_gantt, tab_table, tab_sweep = st.tabs(
+        ["📅 Schedule Gantt", "📋 Recommendations Table",
+         "📈 Capacity Sweep"])
+
+    with tab_gantt:
+        scheduled = schedule_df[schedule_df["is_scheduled"]].copy()
+        if len(scheduled) == 0:
+            st.info("No machines were scheduled in this scenario.")
+        else:
+            scheduled["slot"] = scheduled["scheduled_slot"].astype(int)
+            fig = px.scatter(
+                scheduled, x="slot", y="machine_name", color="risk_level",
+                size="failure_risk",
+                color_discrete_map={
+                    "Service Immediately": "#FF4444",
+                    "Schedule Soon": "#FFAA00",
+                    "Continue Monitoring": "#44BB44"},
+                hover_data=["failure_risk", "estimated_cost"],
+                title=f"Scheduled jobs across {n_slots} slots × {n_crews} crews "
+                      f"(capacity {n_crews * n_slots})",
+                height=max(400, min(900, 18 * len(scheduled))))
+            fig.update_xaxes(title="Time slot",
+                             dtick=1, range=[-0.5, n_slots - 0.5])
+            fig.update_yaxes(title="Machine", autorange="reversed")
+            st.plotly_chart(fig, use_container_width=True)
+
+            deferred = schedule_df[~schedule_df["is_scheduled"]]
+            crit_def = deferred[deferred["failure_risk"] >= safety_threshold]
+            if len(crit_def) > 0:
+                st.error(
+                    f"⚠️ {len(crit_def)} CRITICAL machines were deferred and "
+                    f"are NOT shown above. See the Recommendations Table tab.")
+
+    with tab_table:
+        st.dataframe(
+            schedule_df[["machine_name", "failure_risk", "risk_level",
+                          "is_scheduled", "scheduled_slot", "estimated_cost"]],
+            use_container_width=True, hide_index=True)
+
+    with tab_sweep:
+        if sweep_df is None or len(sweep_df) == 0:
+            st.info("Enable 'Run capacity sweep' in the sidebar to see this.")
+        else:
+            fig = make_subplots(specs=[[{"secondary_y": True}]])
+            fig.add_trace(go.Scatter(
+                x=sweep_df["n_crews"], y=sweep_df["total_cost"],
+                mode="lines+markers", name="Total cost",
+                line=dict(color="#3a7bd5", width=3)), secondary_y=False)
+            fig.add_trace(go.Scatter(
+                x=sweep_df["n_crews"], y=sweep_df["critical_unscheduled"],
+                mode="lines+markers", name="Critical deferred",
+                line=dict(color="#FF4444", width=3, dash="dash")),
+                secondary_y=True)
+            fig.add_vline(x=n_crews, line_dash="dot", line_color="#888",
+                          annotation_text="Current")
+            fig.update_xaxes(title="Crews per slot", dtick=1)
+            fig.update_yaxes(title="Total realised cost ($)", secondary_y=False)
+            fig.update_yaxes(title="Critical machines deferred",
+                             secondary_y=True)
+            fig.update_layout(
+                title="Cost vs Crew Capacity (horizon held constant)",
+                height=420)
+            st.plotly_chart(fig, use_container_width=True)
+            st.dataframe(sweep_df, use_container_width=True, hide_index=True)
+
+
+# ============================================================================
 # Main App
 # ============================================================================
 def main():
@@ -1142,6 +1474,7 @@ def main():
             "Fleet Overview",
             "Risk Assessment",
             "Maintenance Schedule",
+            "Interactive Optimizer",
             "Model Performance",
             "Explainability & AI Insights",
             "Maintenance History",
@@ -1176,6 +1509,8 @@ def main():
         render_risk_assessment(data)
     elif page == "Maintenance Schedule":
         render_maintenance_schedule(data)
+    elif page == "Interactive Optimizer":
+        render_interactive_optimizer(data)
     elif page == "Model Performance":
         render_model_performance(data)
     elif page == "Explainability & AI Insights":
