@@ -31,6 +31,15 @@ sys.path.insert(0, PROJECT_ROOT)
 import config
 from src.evaluation.dashboard_metrics import load_dashboard_metrics
 
+# Local module — sibling file in dashboard/. Streamlit adds dashboard/ to
+# sys.path because app.py is the entry-point script.
+import inference as inf
+try:
+    from streamlit_autorefresh import st_autorefresh
+    HAS_AUTOREFRESH = True
+except ImportError:
+    HAS_AUTOREFRESH = False
+
 # ============================================================================
 # Page Configuration
 # ============================================================================
@@ -1260,92 +1269,100 @@ def render_interactive_optimizer(data):
         "Run what-if scenarios against the MILP scheduler. Adjust crew counts, "
         "horizon, and cost parameters; the advisor explains the trade-offs.")
 
-    # ---- Sidebar: scenario controls ---------------------------------------
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("Optimizer Scenario")
+    # ------------------------------------------------------------------
+    # All controls live in the MAIN panel (no sidebar use). Expanders
+    # keep the page compact when collapsed.
+    # ------------------------------------------------------------------
+    with st.expander("⚙️ Scenario Setup", expanded=True):
+        risk_source = st.radio(
+            "Risk source",
+            ["Latest pipeline run", "Synthetic (Beta distribution)", "Upload CSV"],
+            horizontal=True,
+            help="Where the per-machine failure probabilities come from.",
+            key="opt_risk_source")
 
-    risk_source = st.sidebar.radio(
-        "Risk source",
-        ["Latest pipeline run", "Synthetic (Beta distribution)", "Upload CSV"],
-        help="Where the per-machine failure probabilities come from.")
+        machine_risks: dict = {}
+        machine_names: dict = {}
 
-    machine_risks = {}
-    machine_names = {}
-
-    if risk_source == "Latest pipeline run":
-        rec_df = data.get("recommendations")
-        if rec_df is None or len(rec_df) == 0:
-            st.warning(
-                "No `recommendations.csv` found yet. Run the notebook (or "
-                "`scripts/run_pipeline.py`) once to populate it, or pick "
-                "another risk source.")
-            return
-        for i, row in rec_df.iterrows():
-            machine_risks[i + 1] = float(row["risk_score"])
-            machine_names[i + 1] = str(row["machine"])
-    elif risk_source == "Synthetic (Beta distribution)":
-        n_mach = st.sidebar.slider("Number of machines", 5, 500, 50, 5)
-        alpha = st.sidebar.slider("Beta α (lower = healthier fleet)",
-                                   0.5, 8.0, 2.0, 0.5)
-        beta = st.sidebar.slider("Beta β (higher = healthier fleet)",
-                                  0.5, 8.0, 5.0, 0.5)
-        seed = st.sidebar.number_input("Random seed", value=42, step=1)
-        rng = np.random.default_rng(int(seed))
-        risks_arr = np.clip(rng.beta(alpha, beta, size=n_mach), 0.0, 1.0)
-        for i, r in enumerate(risks_arr, start=1):
-            machine_risks[i] = float(r)
-            machine_names[i] = f"Synth-{i:03d}"
-    else:  # Upload CSV
-        uploaded = st.sidebar.file_uploader(
-            "CSV with columns: machine_id, risk (and optional name)",
-            type=["csv"])
-        if uploaded is None:
-            st.info(
-                "Upload a CSV with at minimum `machine_id` and `risk` columns "
-                "(risk in [0, 1]). An optional `name` column overrides the "
-                "default display name.")
-            return
-        df_up = pd.read_csv(uploaded)
-        if "machine_id" not in df_up.columns or "risk" not in df_up.columns:
-            st.error("CSV must contain `machine_id` and `risk` columns.")
-            return
-        for _, row in df_up.iterrows():
-            mid = int(row["machine_id"])
-            machine_risks[mid] = float(row["risk"])
-            machine_names[mid] = (str(row["name"])
-                                   if "name" in df_up.columns
-                                   else f"Machine-{mid}")
+        if risk_source == "Latest pipeline run":
+            rec_df = data.get("recommendations")
+            if rec_df is None or len(rec_df) == 0:
+                st.warning(
+                    "No `recommendations.csv` found yet. Run the notebook (or "
+                    "`scripts/run_pipeline.py`) once to populate it, or pick "
+                    "another risk source.")
+                return
+            for i, row in rec_df.iterrows():
+                machine_risks[i + 1] = float(row["risk_score"])
+                machine_names[i + 1] = str(row["machine"])
+        elif risk_source == "Synthetic (Beta distribution)":
+            sc1, sc2, sc3, sc4 = st.columns(4)
+            n_mach = sc1.slider("Number of machines", 5, 500, 50, 5,
+                                key="opt_n_mach")
+            alpha  = sc2.slider("Beta α (lower = healthier)",
+                                0.5, 8.0, 2.0, 0.5, key="opt_alpha")
+            beta   = sc3.slider("Beta β (higher = healthier)",
+                                0.5, 8.0, 5.0, 0.5, key="opt_beta")
+            seed   = sc4.number_input("Random seed", value=42, step=1,
+                                      key="opt_seed")
+            rng = np.random.default_rng(int(seed))
+            risks_arr = np.clip(rng.beta(alpha, beta, size=n_mach), 0.0, 1.0)
+            for i, r in enumerate(risks_arr, start=1):
+                machine_risks[i] = float(r)
+                machine_names[i] = f"Synth-{i:03d}"
+        else:  # Upload CSV
+            uploaded = st.file_uploader(
+                "CSV with columns: machine_id, risk (and optional name)",
+                type=["csv"], key="opt_csv")
+            if uploaded is None:
+                st.info(
+                    "Upload a CSV with at minimum `machine_id` and `risk` "
+                    "columns (risk in [0, 1]). An optional `name` column "
+                    "overrides the default display name.")
+                return
+            df_up = pd.read_csv(uploaded)
+            if "machine_id" not in df_up.columns or "risk" not in df_up.columns:
+                st.error("CSV must contain `machine_id` and `risk` columns.")
+                return
+            for _, row in df_up.iterrows():
+                mid = int(row["machine_id"])
+                machine_risks[mid] = float(row["risk"])
+                machine_names[mid] = (str(row["name"])
+                                       if "name" in df_up.columns
+                                       else f"Machine-{mid}")
 
     n_machines = len(machine_risks)
 
-    # Resource & cost knobs.
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("Resources")
-    n_crews = st.sidebar.slider(
-        "Crews per slot", 1, 50, int(config.MAX_CONCURRENT_CREWS), 1)
-    n_slots = st.sidebar.slider(
-        "Scheduling horizon (slots)", 1, 60, int(config.SCHEDULING_HORIZON), 1)
+    with st.expander("🔧 Resources & Costs", expanded=True):
+        rc1, rc2, rc3 = st.columns(3)
+        n_crews = rc1.slider("Crews per slot", 1, 50,
+                             int(config.MAX_CONCURRENT_CREWS), 1,
+                             key="opt_crews")
+        n_slots = rc2.slider("Scheduling horizon (slots)", 1, 60,
+                             int(config.SCHEDULING_HORIZON), 1,
+                             key="opt_slots")
+        safety_threshold = rc3.slider(
+            "Safety risk threshold", 0.0, 1.0,
+            float(config.SAFETY_RISK_THRESHOLD), 0.05, key="opt_safety")
+        cc1, cc2, cc3 = st.columns(3)
+        downtime_cost = cc1.number_input(
+            "Downtime cost per hour ($)", min_value=100, max_value=200_000,
+            value=int(config.DOWNTIME_COST_PER_HOUR), step=500,
+            key="opt_dt_cost")
+        maintenance_cost = cc2.number_input(
+            "Maintenance cost per event ($)", min_value=100, max_value=100_000,
+            value=int(config.MAINTENANCE_COST_BASE), step=100,
+            key="opt_mx_cost")
+        run_sweep = cc3.checkbox(
+            "Run capacity sweep (advisor recommendation)",
+            value=True, key="opt_sweep")
 
-    st.sidebar.subheader("Costs (USD)")
-    downtime_cost = st.sidebar.number_input(
-        "Downtime cost per hour", min_value=100, max_value=200_000,
-        value=int(config.DOWNTIME_COST_PER_HOUR), step=500)
-    maintenance_cost = st.sidebar.number_input(
-        "Maintenance cost per event", min_value=100, max_value=100_000,
-        value=int(config.MAINTENANCE_COST_BASE), step=100)
-    safety_threshold = st.sidebar.slider(
-        "Safety risk threshold", 0.0, 1.0,
-        float(config.SAFETY_RISK_THRESHOLD), 0.05)
-
-    run_sweep = st.sidebar.checkbox(
-        "Run capacity sweep (slower, enables advisor recommendation)",
-        value=True)
-
-    if not st.sidebar.button("▶️ Optimize", type="primary",
-                              use_container_width=True):
+    run_btn = st.button("▶️ Optimize", type="primary",
+                        use_container_width=True, key="opt_run")
+    if not run_btn:
         st.info(
-            f"Loaded **{n_machines}** machines. Adjust the sliders on the left "
-            f"and click **Optimize** to solve the MILP for this scenario.")
+            f"Loaded **{n_machines}** machines. Adjust the controls above and "
+            f"click **Optimize** to solve the MILP for this scenario.")
         return
 
     # ---- Solve --------------------------------------------------------------
@@ -1462,6 +1479,659 @@ def render_interactive_optimizer(data):
 
 
 # ============================================================================
+# Helpers shared by the new simulation pages
+# ============================================================================
+def _engine_picker(data, key_prefix: str):
+    """
+    Renders a 'data source' radio + appropriate controls and returns
+    (window: np.ndarray | None, unit_id: int | None, meta: dict, source_label: str).
+
+    Both options provided (matching the MILP page pattern):
+      • Real engine — pick a unit_id from loaded test/val data
+      • Synthetic   — start from a real window then inject a configurable fault
+    """
+    if "all" not in data or len(data["all"]["X"]) == 0:
+        st.warning("No processed data found. Run the training pipeline first.")
+        return None, None, {}, ""
+
+    fleet = data["all"]
+    unit_ids = sorted(set(int(u) for u in fleet["unit_ids"]))
+
+    source = st.radio(
+        "Data source",
+        ["Real engine (live data)", "Synthetic (inject fault)"],
+        horizontal=True,
+        key=f"{key_prefix}_src")
+
+    cA, cB = st.columns([2, 3])
+    with cA:
+        unit_id = st.selectbox("Engine ID", unit_ids,
+                               index=min(0, len(unit_ids) - 1),
+                               key=f"{key_prefix}_unit")
+        # which window of this engine?
+        rows = np.where(fleet["unit_ids"] == unit_id)[0]
+        cycle_idx = st.slider(
+            "Cycle (window position in engine's life)",
+            0, max(0, len(rows) - 1), max(0, len(rows) - 1),
+            key=f"{key_prefix}_cycle")
+        row = int(rows[cycle_idx])
+        window = fleet["X"][row].copy()
+        meta = {
+            "rul_true": float(fleet["y_rul"][row]),
+            "is_critical": bool(fleet["y_binary"][row] == 1),
+            "unit_id": int(unit_id),
+            "row_index": row,
+        }
+
+    with cB:
+        if source == "Synthetic (inject fault)":
+            n_feat = window.shape[1]
+            sensor_idx = st.number_input(
+                "Sensor index to perturb", min_value=0,
+                max_value=n_feat - 1, value=min(10, n_feat - 1),
+                key=f"{key_prefix}_sidx")
+            mode = st.selectbox(
+                "Fault mode", ["ramp", "step", "spike", "noise"],
+                key=f"{key_prefix}_mode")
+            magnitude = st.slider(
+                "Fault magnitude (in normalised units)",
+                -1.0, 1.0, 0.3, 0.05, key=f"{key_prefix}_mag")
+            window = inf.inject_drift(window, int(sensor_idx),
+                                       float(magnitude), mode=mode)
+            label = (f"Engine {unit_id}, cycle-window {cycle_idx} "
+                     f"+ {mode} fault Δ={magnitude:+.2f} on sensor {sensor_idx}")
+        else:
+            st.caption(
+                f"Engine {unit_id} — true RUL at this window = "
+                f"**{meta['rul_true']:.0f} cycles** "
+                f"({'CRITICAL' if meta['is_critical'] else 'healthy'})")
+            label = f"Engine {unit_id}, cycle-window {cycle_idx} (real)"
+
+    return window, int(unit_id), meta, label
+
+
+def _missing_model_msg(name: str):
+    st.error(
+        f"❌ {name} not loaded. Did you run "
+        "`python scripts/train_all.py` to train and save the models?")
+
+
+# ============================================================================
+# Page — Anomaly Explorer (Autoencoder)
+# ============================================================================
+def render_anomaly_explorer(data):
+    st.title("🔬 Anomaly Explorer — LSTM Autoencoder")
+    st.caption(
+        "Live reconstruction-error scoring on real or perturbed sensor windows.")
+
+    tab_sim, tab_metrics = st.tabs(["🧪 Simulation", "📊 Metrics"])
+
+    with tab_sim:
+        with st.expander("⚙️ Input Selection", expanded=True):
+            window, unit_id, meta, label = _engine_picker(data, "ae")
+
+        if window is None:
+            return
+        if not inf.model_availability()["autoencoder"]:
+            _missing_model_msg("Autoencoder model")
+            return
+
+        with st.spinner("Scoring window..."):
+            res = inf.score_anomaly(window)
+
+        if not res["available"]:
+            _missing_model_msg("Autoencoder model")
+            return
+
+        score = res["score"]
+        thr = res["threshold"]
+        is_anom = res["is_anomaly"]
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Anomaly score (MSE)", f"{score:.5f}")
+        c2.metric("Threshold", f"{thr:.5f}" if not np.isnan(thr) else "—")
+        ratio = score / thr if thr and not np.isnan(thr) and thr > 0 else np.nan
+        c3.metric("Score / Threshold", f"{ratio:.2f}×" if not np.isnan(ratio) else "—")
+        c4.metric("Verdict", "🚨 ANOMALY" if is_anom else "✅ Normal")
+
+        # Gauge
+        gauge = go.Figure(go.Indicator(
+            mode="gauge+number",
+            value=ratio if not np.isnan(ratio) else 0,
+            title={"text": "Anomaly Ratio (× threshold)"},
+            gauge={
+                "axis": {"range": [0, max(3, (ratio or 1) * 1.2)]},
+                "bar": {"color": "#FF4444" if is_anom else "#44BB44"},
+                "steps": [
+                    {"range": [0, 1.0], "color": "#1a3a1a"},
+                    {"range": [1.0, 2.0], "color": "#3a3a1a"},
+                    {"range": [2.0, 5.0], "color": "#3a1a1a"}],
+                "threshold": {"line": {"color": "white", "width": 3},
+                              "thickness": 0.8, "value": 1.0}}))
+        gauge.update_layout(height=320)
+        st.plotly_chart(gauge, use_container_width=True)
+
+        # Per-feature reconstruction error
+        per_feat = res["per_feature_mse"]
+        feat_df = pd.DataFrame({
+            "feature_idx": np.arange(len(per_feat)),
+            "reconstruction_mse": per_feat,
+        }).sort_values("reconstruction_mse", ascending=False).head(20)
+        fig = px.bar(feat_df, x="feature_idx", y="reconstruction_mse",
+                     title="Top 20 features by reconstruction error",
+                     color="reconstruction_mse",
+                     color_continuous_scale="Reds")
+        fig.update_layout(height=360)
+        st.plotly_chart(fig, use_container_width=True)
+
+        # Sensor overlay (input vs recon)
+        n_feat = res["input"].shape[1]
+        sel_sensor = st.slider("Inspect sensor channel", 0, n_feat - 1, 10,
+                                key="ae_inspect")
+        cmp_df = pd.DataFrame({
+            "cycle": np.arange(res["input"].shape[0]),
+            "input": res["input"][:, sel_sensor],
+            "reconstruction": res["recon"][:, sel_sensor],
+        })
+        fig2 = px.line(cmp_df, x="cycle", y=["input", "reconstruction"],
+                       title=f"Sensor {sel_sensor}: input vs reconstruction "
+                             f"({label})",
+                       labels={"value": "Normalised value",
+                               "variable": ""})
+        st.plotly_chart(fig2, use_container_width=True)
+
+    with tab_metrics:
+        m = load_metrics().get("autoencoder", {})
+        if not m:
+            st.info("No saved autoencoder metrics yet — run the pipeline.")
+            return
+        # The autoencoder is unsupervised — there are no precision/recall/F1/AUC
+        # in the metrics file. Show what was actually logged at training time.
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Anomaly threshold",
+                  f"{m.get('anomaly_threshold', float('nan')):.5f}")
+        c2.metric("Test anomaly rate",
+                  f"{m.get('test_anomaly_rate', float('nan')):.1%}")
+        c3.metric("Mean recon score",
+                  f"{m.get('test_mean_score', float('nan')):.5f}")
+        c4.metric("Max recon score",
+                  f"{m.get('test_max_score', float('nan')):.5f}")
+        c5, c6, c7, c8 = st.columns(4)
+        c5.metric("Best val loss",
+                  f"{m.get('val_loss_best', float('nan')):.2e}")
+        c6.metric("Final train loss",
+                  f"{m.get('train_loss_final', float('nan')):.2e}")
+        c7.metric("Latent dim", f"{m.get('latent_dim', '—')}")
+        c8.metric("Epochs", f"{m.get('epochs', '—')}")
+        st.json(m)
+
+
+# ============================================================================
+# Page — Failure Probability Cockpit (LSTM Predictor)
+# ============================================================================
+def render_failure_cockpit(data):
+    st.title("🎯 Failure Probability Cockpit — LSTM Predictor")
+    st.caption("Probability of failure within the prediction horizon, with "
+               "attention weights showing which cycles drove the call.")
+
+    tab_sim, tab_metrics = st.tabs(["🧪 Simulation", "📊 Metrics"])
+
+    with tab_sim:
+        with st.expander("⚙️ Input Selection", expanded=True):
+            window, unit_id, meta, label = _engine_picker(data, "fp")
+
+        if window is None:
+            return
+        if not inf.model_availability()["predictor"]:
+            _missing_model_msg("LSTM Predictor model")
+            return
+
+        with st.spinner("Predicting…"):
+            res = inf.predict_failure(window)
+
+        if not res["available"]:
+            _missing_model_msg("LSTM Predictor model")
+            return
+
+        proba = res["proba"]
+        decision_thr = config.PRED_DECISION_THRESHOLD if hasattr(
+            config, "PRED_DECISION_THRESHOLD") else 0.5
+        decision = "🚨 LIKELY FAILURE" if proba >= decision_thr else "✅ Healthy"
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("P(failure)", f"{proba:.1%}")
+        c2.metric("Decision threshold", f"{decision_thr:.0%}")
+        c3.metric("Verdict", decision)
+        c4.metric("True RUL (this window)", f"{meta.get('rul_true', float('nan')):.0f}")
+
+        # Gauge
+        gauge = go.Figure(go.Indicator(
+            mode="gauge+number+delta",
+            value=proba * 100,
+            number={"suffix": "%"},
+            delta={"reference": decision_thr * 100},
+            title={"text": "Failure probability"},
+            gauge={
+                "axis": {"range": [0, 100]},
+                "bar": {"color": "#FF4444" if proba >= decision_thr else "#44BB44"},
+                "steps": [
+                    {"range": [0, decision_thr * 100], "color": "#1a3a1a"},
+                    {"range": [decision_thr * 100, 100], "color": "#3a1a1a"}],
+                "threshold": {"line": {"color": "white", "width": 3},
+                              "thickness": 0.8,
+                              "value": decision_thr * 100}}))
+        gauge.update_layout(height=320)
+        st.plotly_chart(gauge, use_container_width=True)
+
+        # Attention over cycles
+        attn = res["attention"]
+        if attn is not None:
+            attn_df = pd.DataFrame({
+                "cycle (within window)": np.arange(len(attn)),
+                "attention weight": attn,
+            })
+            fig = px.bar(attn_df, x="cycle (within window)",
+                         y="attention weight",
+                         title="Attention weights — "
+                               "how each cycle contributed to the verdict",
+                         color="attention weight",
+                         color_continuous_scale="Viridis")
+            fig.update_layout(height=320)
+            st.plotly_chart(fig, use_container_width=True)
+
+    with tab_metrics:
+        m = load_metrics().get("predictor", {})
+        if not m:
+            st.info("No saved predictor metrics yet — run the pipeline.")
+            return
+        # Saved key in dashboard_metrics.json is 'auc' (not 'roc_auc').
+        roc = m.get("roc_auc", m.get("auc", float("nan")))
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Test F1",        f"{m.get('f1', float('nan')):.3f}")
+        c2.metric("Precision",      f"{m.get('precision', float('nan')):.3f}")
+        c3.metric("Recall",         f"{m.get('recall', float('nan')):.3f}")
+        c4.metric("ROC AUC",        f"{roc:.3f}")
+        st.json(m)
+
+
+# ============================================================================
+# Page — RUL Estimator (XGBoost)
+# ============================================================================
+def render_rul_estimator(data):
+    st.title("⏳ RUL Estimator — XGBoost (engineered features)")
+    st.caption("Predict Remaining Useful Life. Pick an engine cycle, then "
+               "perturb the top-importance features to see how RUL changes.")
+
+    tab_sim, tab_metrics = st.tabs(["🧪 Simulation", "📊 Metrics & Importance"])
+
+    if not inf.model_availability()["xgboost"]:
+        with tab_sim:
+            _missing_model_msg("XGBoost RUL model")
+        return
+
+    model = inf.get_xgboost()
+
+    with tab_sim:
+        with st.expander("⚙️ Input Selection", expanded=True):
+            source = st.radio(
+                "Data source",
+                ["Real engine (recompute features)", "Manual feature vector"],
+                horizontal=True, key="rul_src")
+
+        if source == "Real engine (recompute features)":
+            features_df = inf.get_engineered_test_features()
+            if features_df is None:
+                st.error("Couldn't run feature engineering. "
+                         "Check raw C-MAPSS data is present in data/raw/.")
+                return
+            unit_ids = sorted(features_df["unit_id"].unique())
+            cA, cB = st.columns(2)
+            unit_id = cA.selectbox("Engine ID", unit_ids,
+                                    key="rul_unit")
+            unit_rows = features_df[features_df["unit_id"] == unit_id]
+            cycle_idx = cB.slider("Cycle index", 0, len(unit_rows) - 1,
+                                   len(unit_rows) - 1, key="rul_cycle")
+            row = unit_rows.iloc[cycle_idx]
+            true_rul = float(row["RUL"])
+            base_features = row[model.feature_names].to_dict()
+        else:
+            unit_id = "manual"
+            true_rul = float("nan")
+            # initialise from training-data midpoint via medians of test
+            features_df = inf.get_engineered_test_features()
+            if features_df is None:
+                st.error("Need engineered features for manual mode.")
+                return
+            base_features = features_df[model.feature_names].median().to_dict()
+
+        # Top-K importance features → sliders
+        with st.expander("🎚️ Perturb top features", expanded=True):
+            imp_df = (model.feature_importance
+                      .head(8)
+                      .reset_index(drop=True))
+            multipliers = {}
+            cols = st.columns(4)
+            for i, name in enumerate(imp_df["feature"].tolist()):
+                multipliers[name] = cols[i % 4].slider(
+                    f"× {name[:24]}",
+                    0.5, 1.5, 1.0, 0.05,
+                    key=f"rul_mult_{i}",
+                    help=f"importance={imp_df.loc[i, 'importance']:.4f}")
+
+        # Build feature vector
+        x = pd.DataFrame([base_features])[model.feature_names]
+        for name, mult in multipliers.items():
+            x[name] = x[name] * mult
+
+        with st.spinner("Predicting…"):
+            res = inf.predict_rul(x)
+
+        rul_pred = res["rul"]
+        rul_pred_base = inf.predict_rul(
+            pd.DataFrame([base_features])[model.feature_names])["rul"]
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Predicted RUL", f"{rul_pred:.1f} cycles",
+                  delta=f"{rul_pred - rul_pred_base:+.1f} vs baseline")
+        c2.metric("Baseline RUL", f"{rul_pred_base:.1f} cycles")
+        c3.metric("True RUL",
+                  f"{true_rul:.0f}" if not np.isnan(true_rul) else "—")
+        if not np.isnan(true_rul):
+            c4.metric("Error", f"{rul_pred - true_rul:+.1f}",
+                      delta_color="inverse")
+
+        # Comparison chart: baseline vs perturbed
+        comp = pd.DataFrame({
+            "scenario": ["Baseline", "Perturbed"],
+            "RUL (cycles)": [rul_pred_base, rul_pred],
+        })
+        fig = px.bar(comp, x="scenario", y="RUL (cycles)",
+                     color="scenario",
+                     color_discrete_map={"Baseline": "#3a7bd5",
+                                          "Perturbed": "#FF4444"
+                                          if rul_pred < rul_pred_base
+                                          else "#44BB44"},
+                     title="RUL: baseline vs your what-if scenario",
+                     text_auto=".1f")
+        fig.update_layout(height=320, showlegend=False)
+        st.plotly_chart(fig, use_container_width=True)
+
+    with tab_metrics:
+        m = load_metrics().get("xgboost", {})
+        if m:
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Test RMSE",      f"{m.get('rmse', float('nan')):.2f}")
+            c2.metric("Test MAE",       f"{m.get('mae', float('nan')):.2f}")
+            c3.metric("R²",             f"{m.get('r2', float('nan')):.3f}")
+            c4.metric("Within ±10 cyc", f"{m.get('within_10_pct', float('nan')):.1f}%")
+        if model.feature_importance is not None:
+            top = model.feature_importance.head(20)
+            fig = px.bar(top, x="importance", y="feature",
+                         orientation="h",
+                         title="Top 20 feature importances",
+                         color="importance",
+                         color_continuous_scale="Blues")
+            fig.update_yaxes(autorange="reversed")
+            fig.update_layout(height=520)
+            st.plotly_chart(fig, use_container_width=True)
+
+
+# ============================================================================
+# Page — Survival Curve Studio (Bayesian Weibull)
+# ============================================================================
+def render_survival_studio(data):
+    st.title("📈 Survival Curve Studio — Bayesian Weibull")
+    st.caption("Time-to-failure with calibrated uncertainty. Compare two "
+               "scenarios on the same engine to quantify the impact of "
+               "operating choices.")
+
+    tab_sim, tab_metrics = st.tabs(["🧪 Simulation", "📊 Metrics"])
+
+    if not inf.model_availability()["survival"]:
+        with tab_sim:
+            _missing_model_msg("Bayesian Survival model")
+        return
+
+    surv = inf.get_survival()
+
+    with tab_sim:
+        features_df = inf.get_engineered_test_features()
+        if features_df is None:
+            st.error("Couldn't load engineered features.")
+            return
+
+        with st.expander("⚙️ Input Selection", expanded=True):
+            unit_ids = sorted(features_df["unit_id"].unique())
+            cA, cB = st.columns(2)
+            unit_id = cA.selectbox("Engine ID", unit_ids, key="surv_unit")
+            unit_rows = features_df[features_df["unit_id"] == unit_id]
+            cycle_idx = cB.slider("Cycle index", 0, len(unit_rows) - 1,
+                                   len(unit_rows) - 1, key="surv_cycle")
+
+        row = unit_rows.iloc[cycle_idx:cycle_idx + 1].copy()
+        true_rul = float(row["RUL"].iloc[0])
+
+        # Counterfactual: scale every covariate by a single factor
+        with st.expander("🎚️ Counterfactual scenario", expanded=True):
+            scale = st.slider("Scale all covariates by",
+                              0.7, 1.3, 0.9, 0.05, key="surv_scale",
+                              help="<1 simulates derating / lighter duty cycle")
+
+        cf_row = row.copy()
+        for c in surv.selected_feature_cols:
+            if c in cf_row.columns:
+                cf_row[c] = cf_row[c] * scale
+
+        times = np.arange(1, config.MAX_RUL + 1, 5)
+        with st.spinner("Computing survival curves…"):
+            sf_base = inf.survival_curve(row, times=times)
+            sf_cf   = inf.survival_curve(cf_row, times=times)
+
+        if sf_base is None or sf_cf is None:
+            st.error("Survival prediction failed. Check model compatibility.")
+            return
+
+        # Plot two curves
+        s_base = sf_base.iloc[:, 0].values
+        s_cf   = sf_cf.iloc[:, 0].values
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=times, y=s_base, mode="lines",
+                                  name="Baseline",
+                                  line=dict(color="#3a7bd5", width=3)))
+        fig.add_trace(go.Scatter(x=times, y=s_cf, mode="lines",
+                                  name=f"Counterfactual (×{scale:.2f})",
+                                  line=dict(color="#FF4444", width=3,
+                                            dash="dash")))
+        fig.add_hline(y=0.5, line_dash="dot", line_color="white",
+                      annotation_text="Median TTF")
+        fig.update_layout(
+            title="Survival probability over time",
+            xaxis_title="Cycles ahead",
+            yaxis_title="P(unit still operational)",
+            height=420, yaxis_range=[0, 1])
+        st.plotly_chart(fig, use_container_width=True)
+
+        # Median TTF readouts
+        def _median_ttf(times, s):
+            below = np.where(s <= 0.5)[0]
+            return int(times[below[0]]) if len(below) else int(times[-1])
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Baseline median TTF",
+                  f"{_median_ttf(times, s_base)} cycles")
+        c2.metric("Counterfactual median TTF",
+                  f"{_median_ttf(times, s_cf)} cycles",
+                  delta=f"{_median_ttf(times, s_cf) - _median_ttf(times, s_base):+d}")
+        c3.metric("Observed RUL", f"{true_rul:.0f} cycles")
+
+    with tab_metrics:
+        m = load_metrics().get("survival", {})
+        if not m:
+            st.info("No saved survival metrics yet.")
+            return
+        # Saved keys: concordance_index, rmse_failures, n_events,
+        # n_censored, n_covariates, aic, log_likelihood.
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Concordance index",
+                   f"{m.get('concordance_index', float('nan')):.3f}")
+        c2.metric("RMSE on failures",
+                   f"{m.get('rmse_failures', float('nan')):.1f}")
+        c3.metric("# events / # censored",
+                   f"{m.get('n_events', 0)} / {m.get('n_censored', 0)}")
+        c4.metric("# covariates",
+                   f"{m.get('n_covariates', '—')}")
+        c5, c6 = st.columns(2)
+        c5.metric("AIC", f"{m.get('aic', float('nan')):.1f}")
+        c6.metric("Log-likelihood",
+                   f"{m.get('log_likelihood', float('nan')):.1f}")
+        st.json(m)
+
+
+# ============================================================================
+# Page — Live Plant Simulator (the showpiece)
+# ============================================================================
+def render_live_simulator(data):
+    st.title("🏭 Live Plant Simulator")
+    st.caption("Real-time fleet animation. Each tick re-scores every engine "
+               "through the autoencoder and predictor; aggregate risk feeds "
+               "the MILP scheduler.")
+
+    tab_sim, tab_metrics = st.tabs(["🛰️ Live Feed", "📊 Pipeline Health"])
+
+    with tab_sim:
+        with st.expander("⚙️ Simulation Controls", expanded=True):
+            sc1, sc2, sc3, sc4 = st.columns(4)
+            n_engines = sc1.slider("Engines to simulate", 5, 60, 20, 5,
+                                    key="lps_n")
+            tick_ms = sc2.slider("Tick interval (ms)", 500, 5000, 2000, 250,
+                                  key="lps_tick",
+                                  help="Browser-side refresh — non-blocking.")
+            running = sc3.toggle("▶️ Running", value=True, key="lps_run")
+            inject_fault = sc4.toggle("💥 Inject random faults",
+                                       value=False, key="lps_fault")
+
+            sd1, sd2 = st.columns(2)
+            data_mode = sd1.radio(
+                "Data source",
+                ["Real engines (replay test set)",
+                 "Synthetic stream (drifted windows)"],
+                horizontal=True, key="lps_mode")
+            seed = sd2.number_input("Random seed", value=7, step=1,
+                                     key="lps_seed")
+
+        if not (inf.model_availability()["predictor"]
+                and inf.model_availability()["autoencoder"]):
+            _missing_model_msg("Predictor or Autoencoder")
+            return
+
+        # Browser-side autorefresh — much faster than time.sleep + st.rerun.
+        if running and HAS_AUTOREFRESH:
+            st_autorefresh(interval=int(tick_ms), key="lps_refresh")
+        elif running and not HAS_AUTOREFRESH:
+            st.warning("Install `streamlit-autorefresh` for live ticks: "
+                       "`pip install streamlit-autorefresh`")
+
+        # Persistent tick counter in session_state
+        st.session_state.setdefault("lps_tick_n", 0)
+        if running:
+            st.session_state["lps_tick_n"] += 1
+        tick_n = st.session_state["lps_tick_n"]
+
+        rng = np.random.default_rng(int(seed) + tick_n)
+        fleet = data["all"]
+        unit_ids = sorted(set(int(u) for u in fleet["unit_ids"]))[:n_engines]
+
+        rows = []
+        for uid in unit_ids:
+            mask = np.where(fleet["unit_ids"] == uid)[0]
+            if len(mask) == 0:
+                continue
+            # Pick a window — for replay, walk forward each tick
+            idx = mask[(tick_n + uid) % len(mask)]
+            window = fleet["X"][idx].copy()
+
+            if data_mode.startswith("Synthetic") or inject_fault:
+                # Add drift on a random sensor
+                sensor = int(rng.integers(0, window.shape[1]))
+                mag = float(rng.uniform(-0.4, 0.4))
+                window = inf.inject_drift(window, sensor, mag, "ramp")
+
+            ae = inf.score_anomaly(window)
+            fp = inf.predict_failure(window)
+            risk = float(fp.get("proba", 0.0))
+            anomaly = float(ae.get("score", 0.0))
+
+            rows.append({
+                "engine": f"E-{uid:03d}",
+                "unit_id": uid,
+                "P(fail)": risk,
+                "anomaly_mse": anomaly,
+                "true_RUL": float(fleet["y_rul"][idx]),
+                "level": ("Critical" if risk >= 0.7
+                          else "Watch" if risk >= 0.4
+                          else "OK"),
+            })
+
+        live_df = pd.DataFrame(rows)
+
+        # KPI strip
+        n_critical = int((live_df["P(fail)"] >= 0.7).sum())
+        n_watch = int(((live_df["P(fail)"] >= 0.4) &
+                        (live_df["P(fail)"] < 0.7)).sum())
+        n_ok = len(live_df) - n_critical - n_watch
+        avg_risk = float(live_df["P(fail)"].mean()) if len(live_df) else 0.0
+
+        k1, k2, k3, k4, k5 = st.columns(5)
+        k1.metric("Tick #", tick_n)
+        k2.metric("🟢 OK", n_ok)
+        k3.metric("🟡 Watch", n_watch)
+        k4.metric("🔴 Critical", n_critical)
+        k5.metric("Avg P(fail)", f"{avg_risk:.1%}")
+
+        # Fleet grid (heatmap-style scatter)
+        if len(live_df):
+            grid_n = int(np.ceil(np.sqrt(len(live_df))))
+            live_df["x"] = np.arange(len(live_df)) % grid_n
+            live_df["y"] = np.arange(len(live_df)) // grid_n
+            fig = px.scatter(
+                live_df, x="x", y="y", color="P(fail)",
+                size="P(fail)", size_max=40,
+                color_continuous_scale=[(0, "#44BB44"),
+                                         (0.5, "#FFAA00"),
+                                         (1, "#FF4444")],
+                range_color=[0, 1],
+                hover_data=["engine", "anomaly_mse", "true_RUL", "level"],
+                title=f"Live fleet view — tick {tick_n}",
+                height=480)
+            fig.update_traces(marker=dict(line=dict(width=2, color="#222")))
+            fig.update_yaxes(autorange="reversed", showticklabels=False)
+            fig.update_xaxes(showticklabels=False)
+            st.plotly_chart(fig, use_container_width=True, key=f"lps_grid_{tick_n}")
+
+        # Top 10 most-at-risk table
+        st.subheader("Top 10 at-risk engines (this tick)")
+        top = live_df.sort_values("P(fail)", ascending=False).head(10)
+        st.dataframe(top[["engine", "P(fail)", "anomaly_mse", "true_RUL",
+                           "level"]],
+                      use_container_width=True, hide_index=True)
+
+        # Auto-trigger MILP if many criticals
+        if n_critical > 0:
+            st.warning(
+                f"⚠️ {n_critical} critical engine(s) detected. "
+                "Open the **Interactive Optimizer** page to schedule them.")
+
+    with tab_metrics:
+        avail = inf.model_availability()
+        st.markdown("### Pipeline component status")
+        for k, v in avail.items():
+            st.write(f"- **{k}**: {'✅ loaded' if v else '❌ missing'}")
+        st.markdown("---")
+        st.markdown("### Recent metrics snapshot")
+        st.json(load_metrics())
+
+
+# ============================================================================
 # Main App
 # ============================================================================
 def main():
@@ -1472,7 +2142,12 @@ def main():
         "Navigation",
         [
             "Fleet Overview",
+            "🏭 Live Plant Simulator",
             "Risk Assessment",
+            "🔬 Anomaly Explorer",
+            "🎯 Failure Probability Cockpit",
+            "⏳ RUL Estimator",
+            "📈 Survival Curve Studio",
             "Maintenance Schedule",
             "Interactive Optimizer",
             "Model Performance",
@@ -1505,8 +2180,18 @@ def main():
 
     if page == "Fleet Overview":
         render_fleet_overview(data)
+    elif page == "🏭 Live Plant Simulator":
+        render_live_simulator(data)
     elif page == "Risk Assessment":
         render_risk_assessment(data)
+    elif page == "🔬 Anomaly Explorer":
+        render_anomaly_explorer(data)
+    elif page == "🎯 Failure Probability Cockpit":
+        render_failure_cockpit(data)
+    elif page == "⏳ RUL Estimator":
+        render_rul_estimator(data)
+    elif page == "📈 Survival Curve Studio":
+        render_survival_studio(data)
     elif page == "Maintenance Schedule":
         render_maintenance_schedule(data)
     elif page == "Interactive Optimizer":

@@ -105,17 +105,37 @@ class BayesianSurvival:
         if self.selected_feature_cols is None:
             raise RuntimeError("Model not fitted. Call fit() first.")
 
-        df_surv, _ = self.prepare_survival_data(df, rul_col=rul_col)
-
-        missing = [c for c in self.selected_feature_cols if c not in df_surv.columns]
+        # Do minimal cleanup directly (do NOT call prepare_survival_data,
+        # which re-applies the top-20-by-correlation filter and would drop
+        # the saved feature columns at predict time, especially on small
+        # batches where correlations are degenerate).
+        missing = [c for c in self.selected_feature_cols if c not in df.columns]
         if missing:
             raise ValueError(
                 f"Prediction data is missing columns present during fit: {missing}"
             )
-        keep = self.selected_feature_cols + [
-            c for c in ["duration", "event"] if c in df_surv.columns
-        ]
-        return df_surv[[c for c in keep if c in df_surv.columns]]
+
+        df_surv = df.copy()
+
+        # Synthesize duration/event from RUL if available; otherwise use
+        # placeholder values (lifelines requires the columns to be present
+        # for some prediction APIs but does not use them for survival_function).
+        if rul_col in df_surv.columns:
+            df_surv["duration"] = df_surv[rul_col].clip(lower=1)
+            df_surv["event"] = (df_surv[rul_col] == 0).astype(int)
+        else:
+            df_surv["duration"] = 1.0
+            df_surv["event"] = 0
+
+        # Sanitize feature values (inf/NaN) on the saved feature set only.
+        for col in self.selected_feature_cols:
+            df_surv[col] = df_surv[col].replace([np.inf, -np.inf], np.nan)
+            if df_surv[col].isna().any():
+                med = df_surv[col].median()
+                df_surv[col] = df_surv[col].fillna(0.0 if pd.isna(med) else med)
+
+        keep = self.selected_feature_cols + ["duration", "event"]
+        return df_surv[keep]
 
     def fit(self, df, rul_col="RUL"):
         """
