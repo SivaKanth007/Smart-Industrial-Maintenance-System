@@ -233,14 +233,24 @@ class DataPreprocessor:
             df_synthetic = df_synthetic[df_train.columns]
 
             real_train_count = len(df_train)
+
+            # Step 4a: Fit scaler on REAL training data only (before synthetic merge)
+            # so that synthetic value ranges don't bias the normalization.
+            df_train = self.normalize(df_train, fit=True)
+            df_synthetic = self.normalize(df_synthetic, fit=False)
+
             df_train = pd.concat([df_train, df_synthetic], ignore_index=True)
             print(f"[PREPROCESS] Training set: {real_train_count} real + "
                   f"{len(df_synthetic)} synthetic = {len(df_train)} total")
 
-        # Step 4: Normalize (fit on train including synthetic, transform val/test)
-        df_train = self.normalize(df_train, fit=True)
-        df_val = self.normalize(df_val, fit=False)
-        df_test = self.normalize(df_test, fit=False)
+            # Transform val/test with the real-data-fitted scaler
+            df_val = self.normalize(df_val, fit=False)
+            df_test = self.normalize(df_test, fit=False)
+        else:
+            # No augmentation — fit scaler on train, transform val/test
+            df_train = self.normalize(df_train, fit=True)
+            df_val = self.normalize(df_val, fit=False)
+            df_test = self.normalize(df_test, fit=False)
 
         # Step 5: Create sequences
         result = {}

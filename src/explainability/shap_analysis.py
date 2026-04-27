@@ -5,10 +5,12 @@ Feature attribution for XGBoost and LSTM models using SHAP values.
 """
 
 import os
+import re
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import shap
+import joblib
 
 import config
 
@@ -71,7 +73,11 @@ class SHAPExplainer:
         shap.Explanation or np.ndarray of SHAP values
         """
         if self.explainer is None:
-            self.setup_explainer()
+            # Auto-setup: pass X itself as background for non-tree models
+            if self.model_type == "xgboost":
+                self.setup_explainer()
+            else:
+                self.setup_explainer(X_background=X)
 
         if len(X) > max_samples:
             rng = np.random.default_rng(config.RANDOM_SEED)
@@ -199,3 +205,59 @@ class SHAPExplainer:
             plt.savefig(save_path, dpi=150, bbox_inches='tight')
             print(f"[SHAP] Saved force plot to {save_path}")
         plt.close()
+
+    def get_sensor_ranking_aggregated(self):
+        """
+        Rank by BASE sensor name, aggregating all engineered features.
+
+        E.g. sensor_11_roll20_max, sensor_11_roll5_mean → 'sensor_11'.
+        Gives an operator-friendly view: "sensor 11 matters most."
+
+        Returns
+        -------
+        pd.DataFrame — sorted by aggregated importance
+        """
+        ranking = self.get_sensor_ranking()
+
+        def _extract_base(name: str) -> str:
+            m = re.match(r"(sensor_\d+)", name)
+            return m.group(1) if m else name
+
+        ranking["base_sensor"] = ranking["feature"].apply(_extract_base)
+        agg = (
+            ranking.groupby("base_sensor")["mean_abs_shap"]
+            .sum()
+            .sort_values(ascending=False)
+            .reset_index()
+        )
+        agg.columns = ["sensor", "total_shap_importance"]
+
+        print("\n[SHAP] Aggregated Sensor Ranking:")
+        print(agg.head(15).to_string(index=False))
+        return agg
+
+    # ------------------------------------------------------------------
+    # Persistence
+    # ------------------------------------------------------------------
+
+    def save_shap_values(self, filepath=None):
+        """Save computed SHAP values + metadata to disk."""
+        filepath = filepath or os.path.join(config.MODELS_DIR, "shap_values.pkl")
+        if self.shap_values is None:
+            raise RuntimeError("No SHAP values to save. Call compute_shap_values first.")
+        joblib.dump({
+            "shap_values": self.shap_values,
+            "feature_names": self.feature_names,
+            "X_sample": self.X_sample,
+            "model_type": self.model_type,
+        }, filepath)
+        print(f"[SHAP] Saved SHAP values to {filepath}")
+
+    def load_shap_values(self, filepath=None):
+        """Load previously computed SHAP values from disk."""
+        filepath = filepath or os.path.join(config.MODELS_DIR, "shap_values.pkl")
+        state = joblib.load(filepath)
+        self.shap_values = state["shap_values"]
+        self.feature_names = state["feature_names"]
+        self.X_sample = state["X_sample"]
+        print(f"[SHAP] Loaded SHAP values from {filepath}")

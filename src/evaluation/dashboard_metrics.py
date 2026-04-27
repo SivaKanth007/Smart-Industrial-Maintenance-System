@@ -348,6 +348,7 @@ def _build_simulation_metrics(sim_df) -> dict:
         ("Reactive", "reactive"),
         ("Scheduled (every 30)", "scheduled"),
         ("Optimized (Risk-Based)", "optimized"),
+        ("Noisy Predictor", "noisy_predictor"),
     ]:
         pdf = sim_df[sim_df["policy"] == policy_name]
         if len(pdf) > 0:

@@ -9,8 +9,17 @@ import os
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from scipy import stats as sp_stats
 
 import config
+
+# ---------------------------------------------------------------------------
+# Shared constants — every policy uses the SAME restoration model so the
+# comparison is fair (policies differ only by *when* they trigger, not by
+# *how much* health is restored).
+# ---------------------------------------------------------------------------
+_PREVENTIVE_RESTORE = 0.6   # health bump after a planned service
+_FAILURE_RESTORE    = 0.9   # health bump after a breakdown repair
 
 
 class MaintenanceSimulator:
@@ -20,7 +29,8 @@ class MaintenanceSimulator:
     Policies:
     1. Reactive: Fix only after failure
     2. Scheduled: Fixed-interval preventive maintenance
-    3. Optimized: Risk-based scheduling from MILP optimizer
+    3. Optimized (Oracle): Risk-based with perfect health knowledge (upper bound)
+    4. Noisy Predictor: Risk-based with realistic prediction noise (estimated real performance)
 
     Metrics:
     - Total cost (downtime + maintenance)
@@ -108,15 +118,15 @@ class MaintenanceSimulator:
                     last_maintenance = t
                     n_preventive += 1
                     health[m, t:] = np.minimum(
-                        health[m, t:] + 0.5, 1
-                    )  # partial restoration
+                        health[m, t:] + _PREVENTIVE_RESTORE, 1
+                    )
 
                 # Still check for failures
                 if health[m, t] <= 0.05:
                     total_cost += self.failure_cost
                     total_downtime += self.downtime_per_failure
                     failures += 1
-                    health[m, t:] = np.minimum(health[m, t:] + 0.8, 1)
+                    health[m, t:] = np.minimum(health[m, t:] + _FAILURE_RESTORE, 1)
 
         availability = (1 - total_downtime / (self.n_machines * self.n_periods * 24)) * 100
         return {
@@ -150,24 +160,81 @@ class MaintenanceSimulator:
 
                 # Predictive maintenance when risk is high
                 if health_score < risk_threshold and health_score > 0.05:
-                    # Schedule maintenance BEFORE failure
-                    total_cost += self.preventive_cost * 1.2  # slightly higher for prediction
+                    total_cost += self.preventive_cost
                     total_downtime += self.downtime_per_preventive
                     n_preventive += 1
-                    # Restore health
-                    restore = min(0.7, 1 - health_score)
-                    health[m, t:] = np.minimum(health[m, t:] + restore, 1)
+                    # Same restoration model as scheduled policy
+                    health[m, t:] = np.minimum(
+                        health[m, t:] + _PREVENTIVE_RESTORE, 1
+                    )
 
                 elif health_score <= 0.05:
                     # Failure occurred despite predictions
                     total_cost += self.failure_cost
                     total_downtime += self.downtime_per_failure
                     failures += 1
-                    health[m, t:] = np.minimum(health[m, t:] + 0.8, 1)
+                    health[m, t:] = np.minimum(health[m, t:] + _FAILURE_RESTORE, 1)
 
         availability = (1 - total_downtime / (self.n_machines * self.n_periods * 24)) * 100
         return {
             "policy": "Optimized (Risk-Based)",
+            "total_cost": total_cost,
+            "total_downtime_hours": total_downtime,
+            "availability_pct": min(100, availability),
+            "n_failures": failures,
+            "n_preventive": n_preventive,
+        }
+
+    def run_noisy_optimized(self, health, risk_threshold=0.4, noise_sigma=0.15):
+        """
+        Noisy-predictor policy: risk-based maintenance with imperfect predictions.
+
+        Same logic as ``run_optimized`` but adds Gaussian noise to the health
+        signal before making decisions. This simulates the real-world scenario
+        where the LSTM predictor has limited accuracy (F1 ≈ 0.87).
+
+        Parameters
+        ----------
+        health : np.ndarray, shape (n_machines, n_periods)
+        risk_threshold : float
+            Maintenance triggered when *observed* health < threshold.
+        noise_sigma : float
+            Std-dev of the Gaussian noise added to the true health.
+            Default 0.15 approximates the uncertainty of a strong but
+            imperfect binary predictor (F1 ≈ 0.87).
+        """
+        total_cost = 0
+        total_downtime = 0
+        failures = 0
+        n_preventive = 0
+
+        for m in range(self.n_machines):
+            for t in range(1, self.n_periods):
+                true_health = health[m, t]
+
+                # Simulate noisy prediction: the model doesn't know exact health
+                observed_health = true_health + self.rng.normal(0, noise_sigma)
+                observed_health = np.clip(observed_health, 0, 1)
+
+                # Decide based on noisy observation
+                if observed_health < risk_threshold and true_health > 0.05:
+                    total_cost += self.preventive_cost
+                    total_downtime += self.downtime_per_preventive
+                    n_preventive += 1
+                    health[m, t:] = np.minimum(
+                        health[m, t:] + _PREVENTIVE_RESTORE, 1
+                    )
+
+                elif true_health <= 0.05:
+                    # Actual failure — noise doesn't prevent this
+                    total_cost += self.failure_cost
+                    total_downtime += self.downtime_per_failure
+                    failures += 1
+                    health[m, t:] = np.minimum(health[m, t:] + _FAILURE_RESTORE, 1)
+
+        availability = (1 - total_downtime / (self.n_machines * self.n_periods * 24)) * 100
+        return {
+            "policy": "Noisy Predictor",
             "total_cost": total_cost,
             "total_downtime_hours": total_downtime,
             "availability_pct": min(100, availability),
@@ -193,12 +260,13 @@ class MaintenanceSimulator:
         for sim in range(n_simulations):
             health_base = self.simulate_machine_health()
 
-            # Run each policy on a copy
+            # Run each policy on an independent copy of the same health trajectory
             reactive = self.run_reactive(health_base.copy())
             scheduled = self.run_scheduled(health_base.copy())
             optimized = self.run_optimized(health_base.copy())
+            noisy     = self.run_noisy_optimized(health_base.copy())
 
-            for result in [reactive, scheduled, optimized]:
+            for result in [reactive, scheduled, optimized, noisy]:
                 result["simulation"] = sim
                 all_results.append(result)
 
@@ -230,9 +298,30 @@ class MaintenanceSimulator:
         optimized_downtime = df[df["policy"] == "Optimized (Risk-Based)"]["total_downtime_hours"].mean()
         downtime_reduction = (1 - optimized_downtime / reactive_downtime) * 100
 
-        print(f"\n[RESULTS] Optimized vs Reactive:")
-        print(f"  Cost reduction:     {cost_reduction:.1f}%")
+        # Per-policy 95% confidence intervals
+        print("\n  95% Confidence Intervals (cost):")
+        for policy_name in ["Reactive", "Scheduled (every 30)",
+                            "Optimized (Risk-Based)", "Noisy Predictor"]:
+            costs = df[df["policy"] == policy_name]["total_cost"]
+            if len(costs) > 1:
+                ci = sp_stats.t.interval(
+                    0.95, df=len(costs) - 1,
+                    loc=costs.mean(), scale=costs.sem(),
+                )
+                print(f"  {policy_name}: ${ci[0]:,.0f} – ${ci[1]:,.0f}")
+
+        # Noisy predictor vs reactive (realistic savings)
+        noisy_cost = df[df["policy"] == "Noisy Predictor"]["total_cost"].mean()
+        noisy_downtime = df[df["policy"] == "Noisy Predictor"]["total_downtime_hours"].mean()
+        noisy_cost_red = (1 - noisy_cost / reactive_cost) * 100 if reactive_cost > 0 else 0
+        noisy_dt_red = (1 - noisy_downtime / reactive_downtime) * 100 if reactive_downtime > 0 else 0
+
+        print(f"\n[RESULTS] Optimized (Oracle) vs Reactive:")
+        print(f"  Cost reduction:     {cost_reduction:.1f}%  (theoretical upper bound)")
         print(f"  Downtime reduction: {downtime_reduction:.1f}%")
+        print(f"\n[RESULTS] Noisy Predictor vs Reactive:")
+        print(f"  Cost reduction:     {noisy_cost_red:.1f}%  (realistic estimate)")
+        print(f"  Downtime reduction: {noisy_dt_red:.1f}%")
 
         return df, summary
 
@@ -245,27 +334,28 @@ class MaintenanceSimulator:
                      fontsize=16, fontweight='bold', y=1.02)
 
         colors = {"Reactive": "#FF6B6B", "Scheduled (every 30)": "#FFA726",
-                  "Optimized (Risk-Based)": "#66BB6A"}
+                  "Optimized (Risk-Based)": "#66BB6A", "Noisy Predictor": "#42A5F5"}
 
         # 1. Total Cost
         ax = axes[0, 0]
         for policy in colors:
             data = df[df["policy"] == policy]["total_cost"]
-            ax.hist(data, alpha=0.6, label=policy, color=colors[policy], bins=20)
+            if len(data) > 0:
+                ax.hist(data, alpha=0.5, label=policy, color=colors[policy], bins=20)
         ax.set_xlabel("Total Cost ($)")
         ax.set_title("Cost Distribution")
-        ax.legend(fontsize=8)
+        ax.legend(fontsize=7)
         ax.grid(True, alpha=0.3)
 
         # 2. Downtime
         ax = axes[0, 1]
-        policy_names = list(colors.keys())
+        policy_names = [p for p in colors if len(df[df["policy"] == p]) > 0]
         means = [df[df["policy"] == p]["total_downtime_hours"].mean() for p in policy_names]
         stds = [df[df["policy"] == p]["total_downtime_hours"].std() for p in policy_names]
         bars = ax.bar(range(len(policy_names)), means, yerr=stds,
                       color=[colors[p] for p in policy_names], capsize=5)
         ax.set_xticks(range(len(policy_names)))
-        ax.set_xticklabels(["Reactive", "Scheduled", "Optimized"], fontsize=9)
+        ax.set_xticklabels(["Reactive", "Scheduled", "Oracle", "Noisy"], fontsize=9)
         ax.set_ylabel("Downtime (hours)")
         ax.set_title("Average Downtime")
         ax.grid(True, alpha=0.3)
@@ -276,7 +366,7 @@ class MaintenanceSimulator:
         bars = ax.bar(range(len(policy_names)), means,
                       color=[colors[p] for p in policy_names])
         ax.set_xticks(range(len(policy_names)))
-        ax.set_xticklabels(["Reactive", "Scheduled", "Optimized"], fontsize=9)
+        ax.set_xticklabels(["Reactive", "Scheduled", "Oracle", "Noisy"], fontsize=9)
         ax.set_ylabel("Number of Failures")
         ax.set_title("Average Failures per Simulation")
         ax.grid(True, alpha=0.3)
@@ -287,7 +377,7 @@ class MaintenanceSimulator:
         bars = ax.bar(range(len(policy_names)), means,
                       color=[colors[p] for p in policy_names])
         ax.set_xticks(range(len(policy_names)))
-        ax.set_xticklabels(["Reactive", "Scheduled", "Optimized"], fontsize=9)
+        ax.set_xticklabels(["Reactive", "Scheduled", "Oracle", "Noisy"], fontsize=9)
         ax.set_ylabel("Availability (%)")
         ax.set_title("Equipment Availability")
         ax.set_ylim(90, 101)

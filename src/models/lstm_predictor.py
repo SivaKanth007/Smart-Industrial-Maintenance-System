@@ -257,14 +257,15 @@ class PredictorTrainer:
                     self.best_epoch = epoch + 1
                     epochs_since_best_f1 = 0
                 else:
-                    epochs_since_best_f1 += 1
+                    epochs_since_best_f1 += 2  # +2 because validation runs every 2 epochs
 
                 postfix.update({"F1": f"{metrics['f1']:.4f}",
                                 "AUC": f"{metrics['auc']:.4f}"})
 
                 if self.early_stopping_patience is not None and epochs_since_best_f1 >= self.early_stopping_patience:
                     self.stopped_epoch = epoch + 1
-                    print(f"[PREDICTOR] Early stopping after {epoch + 1} epochs; no F1 improvement for {epochs_since_best_f1} epochs.")
+                    print(f"[PREDICTOR] Early stopping at epoch {epoch + 1}: "
+                          f"no F1 improvement for {epochs_since_best_f1} epochs.")
                     break
 
             epoch_bar.set_postfix(postfix)
@@ -371,8 +372,9 @@ class PredictorTrainer:
         best_epoch = epochs[f1_scores.index(best_f1)]
         print(f"[PREDICTOR] Best F1: {best_f1:.4f} at epoch {best_epoch}")
 
-        # Display the plot inline in the notebook
-        plt.show()
+        # plt.show() intentionally removed — it blocks headless / script
+        # runs.  The chart is already saved to disk by plt.savefig above.
+        plt.close()
 
     def save_model(self, filepath=None):
         """Save trained model."""
@@ -382,6 +384,7 @@ class PredictorTrainer:
             "input_dim": self.model.input_dim,
             "hidden_dim": self.model.hidden_dim,
             "num_layers": self.model.num_layers,
+            "dropout": self.model.dropout,
             "train_history": self.train_history,
             "val_history": self.val_history,
         }, filepath)
@@ -398,6 +401,7 @@ def load_predictor(filepath=None):
         input_dim=checkpoint["input_dim"],
         hidden_dim=checkpoint["hidden_dim"],
         num_layers=checkpoint["num_layers"],
+        dropout=checkpoint.get("dropout", config.PRED_DROPOUT),
     )
     model.load_state_dict(checkpoint["model_state"])
     model.to(config.DEVICE)
